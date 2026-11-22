@@ -934,6 +934,107 @@ final class RefreshTests: LocalizeTestCase {
         XCTAssertEqual(french.string("a"), "A en français")
     }
 
+    /// Three instances of one project. The device held the first one's
+    /// release, then another version, and then the first version again with
+    /// another language's files only. The first instance finds nothing newer
+    /// published, but what the device holds of its release now lacks its
+    /// files: they are saved again, beside the other language's.
+    func testAnUpToDateRefreshSavesTheFilesTheDeviceLacksOfTheRelease() async throws {
+        stub.publish("v1", ["en/translation": ["a": "A"], "de/translation": ["a": "A auf Deutsch"]])
+        stub.publish("v2", ["en/translation": ["a": "A2"]])
+        let english = Localize(configuration: configuration(locale: "en", version: "v1"))
+        try await english.refresh()
+        stub.setPointer("v2")
+        try await Localize(configuration: configuration(locale: "en")).refresh()
+        XCTAssertEqual(savedFiles, ["current.json", "v2.json"])
+        try await Localize(configuration: configuration(locale: "de", version: "v1")).refresh()
+        XCTAssertEqual(savedFiles, ["current.json", "v1.json"])
+
+        let result = try await english.refresh()
+
+        XCTAssertEqual(result, .upToDate(version: "v1"))
+        stub.goOffline()
+        XCTAssertEqual(Localize(configuration: configuration(locale: "en", version: "v1")).string("a"), "A")
+        XCTAssertEqual(
+            Localize(configuration: configuration(locale: "de", version: "v1")).string("a"), "A auf Deutsch"
+        )
+        XCTAssertEqual(stub.requestCount("/demo/v1/en/translation.json"), 1)
+        XCTAssertEqual(stub.requestCount("/demo/v1/de/translation.json"), 1)
+    }
+
+    /// The saved files exist but cannot be read when the app starts, as
+    /// before the first unlock after a restart. The run could not look, which
+    /// is not the same as starting with nothing: `configure` called again
+    /// once they can be read starts from the saved release.
+    func testNextLaunchPolicyStartsFromASavedReleaseThatCouldNotBeReadAtFirst() async throws {
+        addTeardownBlock { Localize.resetShared() }
+        _ = try await loaded(["en/translation": ["a": "A"]])
+        let pointer = cacheDirectory.appendingPathComponent("demo").appendingPathComponent("current.json")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: pointer.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: pointer.path) }
+        stub.goOffline()
+        let locked = Localize.configure(configuration(policy: .nextLaunch), refresh: false)
+        XCTAssertNil(locked.version)
+        XCTAssertEqual(locked.string("a", fallback: "bundled"), "bundled")
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: pointer.path)
+        let unlocked = Localize.configure(configuration(policy: .nextLaunch), refresh: false)
+
+        XCTAssertEqual(unlocked.version, "v1")
+        XCTAssertEqual(unlocked.string("a"), "A")
+    }
+
+    /// The same without a second `configure`: the next refresh reads the
+    /// device again, and what it finds is the release of this run. A newer
+    /// one still waits for the next launch.
+    func testARefreshStartsFromASavedReleaseThatCouldNotBeReadAtFirst() async throws {
+        addTeardownBlock { Localize.resetShared() }
+        _ = try await loaded(["en/translation": ["a": "A"]])
+        let pointer = cacheDirectory.appendingPathComponent("demo").appendingPathComponent("current.json")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: pointer.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: pointer.path) }
+        let localize = Localize.configure(configuration(policy: .nextLaunch), refresh: false)
+        XCTAssertNil(localize.version)
+        let updates = localize.updates
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: pointer.path)
+        stub.setPointer("v2")
+        stub.publish("v2", ["en/translation": ["a": "A2"]])
+        let result = try await localize.refresh()
+
+        XCTAssertEqual(result, .pendingNextLaunch(version: "v2"))
+        XCTAssertEqual(localize.version, "v1")
+        XCTAssertEqual(localize.string("a"), "A")
+        let announced = await nextValue(of: updates)
+        XCTAssertEqual(announced, "v1")
+        // It is the run's release for a later `configure` too.
+        let again = Localize.configure(configuration(policy: .nextLaunch), refresh: false)
+        XCTAssertEqual(again.string("a"), "A")
+        Localize.resetShared()
+        stub.goOffline()
+        XCTAssertEqual(Localize.configure(configuration(policy: .nextLaunch), refresh: false).string("a"), "A2")
+    }
+
+    /// A run that saved a release over files it could never read has nothing
+    /// of the device to start from: what it saved waits for the next launch.
+    func testAReleaseSavedOverFilesThatCouldNotBeReadWaitsForTheNextLaunch() async throws {
+        _ = try await loaded(["en/translation": ["a": "A"]])
+        let pointer = cacheDirectory.appendingPathComponent("demo").appendingPathComponent("current.json")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: pointer.path)
+        let localize = Localize(configuration: configuration(policy: .nextLaunch))
+        stub.setPointer("v2")
+        stub.publish("v2", ["en/translation": ["a": "A2"]])
+        let first = try await localize.refresh()
+        XCTAssertEqual(first, .pendingNextLaunch(version: "v2"))
+        XCTAssertEqual(savedFiles, ["current.json", "v2.json"])
+
+        let second = try await localize.refresh()
+
+        XCTAssertEqual(second, .pendingNextLaunch(version: "v2"))
+        XCTAssertNil(localize.version)
+        XCTAssertEqual(localize.string("a", fallback: "bundled"), "bundled")
+    }
+
     func testAPinnedVersionThatIsNotPublishedYetIsNotSavedAsEmpty() async throws {
         let localize = Localize(configuration: configuration(fallback: nil, version: "v3"))
         let url = URL(string: "\(StubTransport.base)/demo/v3/en/translation.json")!
@@ -1156,6 +1257,32 @@ final class RefreshTests: LocalizeTestCase {
         XCTAssertEqual(third.string("a"), "v2")
 
         await fulfillment(of: [observed], timeout: 0.2)
+    }
+
+    /// Files of the release the run already reads change nothing on screen,
+    /// so they are used although the device cannot take them now. The next
+    /// refresh saves them.
+    func testNextLaunchPolicyUsesFilesOfTheReleaseInUseThatCouldNotBeSaved() async throws {
+        _ = try await loaded(["en/translation": ["a": "A"]])
+        let folder = cacheDirectory.appendingPathComponent("demo")
+        let french = Localize(configuration: configuration(locale: "fr", fallback: "en", policy: .nextLaunch))
+        XCTAssertNil(french.version)
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: folder.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path) }
+
+        let result = try await french.refresh()
+
+        XCTAssertEqual(result, .updated(version: "v1"))
+        XCTAssertEqual(french.version, "v1")
+        XCTAssertEqual(french.string("a", fallback: "bundled"), "A")
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
+        let second = try await french.refresh()
+        XCTAssertEqual(second, .upToDate(version: "v1"))
+        stub.goOffline()
+        let next = Localize(configuration: configuration(locale: "fr", fallback: "en", policy: .nextLaunch))
+        XCTAssertEqual(next.version, "v1")
+        XCTAssertEqual(next.string("a", fallback: "bundled"), "A")
     }
 
     func testNextLaunchPolicyFailsWhenTheReleaseCannotBeSaved() async throws {

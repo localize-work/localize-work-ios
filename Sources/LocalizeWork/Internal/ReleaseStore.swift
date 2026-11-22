@@ -21,26 +21,35 @@ struct ReleaseStore: Sendable {
         source = cdnBaseURL.absoluteString
     }
 
-    /// The saved release, or nil when there is none. A saved release that is
-    /// damaged or incomplete is deleted and counts as none.
-    func load() -> Release? {
-        guard FileManager.default.fileExists(atPath: directory.path) else { return nil }
-        switch read() {
+    /// What the device holds for this project.
+    enum Stored {
+        case release(Release)
+        case nothing
+        /// The files are there but cannot be read now, as on a device that
+        /// has not been unlocked since it started. That says nothing about
+        /// what they hold, so they stay, and are worth reading again later.
+        case unreadable
+    }
+
+    /// What is saved. A saved release that is damaged or incomplete is
+    /// deleted and counts as nothing.
+    func read() -> Stored {
+        guard FileManager.default.fileExists(atPath: directory.path) else { return .nothing }
+        switch readFiles() {
         case .release(let release):
-            return release
+            return .release(release)
         case .damaged:
             discard()
-            return nil
+            return .nothing
         case .unreadable:
-            return nil
+            return .unreadable
         }
     }
 
-    /// The version of the saved release, read from the file that names it;
-    /// nil when there is none or it cannot be read.
-    func savedVersion() -> String? {
-        guard case .some(.some(let pointer)) = data(at: currentURL) else { return nil }
-        return ReleaseJSON.pointerVersion(from: pointer)
+    /// The saved release, or nil when there is none or it cannot be read.
+    func load() -> Release? {
+        if case .release(let release) = read() { return release }
+        return nil
     }
 
     /// Saves `release` as the current one and deletes every other version.
@@ -82,12 +91,11 @@ struct ReleaseStore: Sendable {
         case release(Release)
         /// Not a complete, valid release of this project.
         case damaged
-        /// The files could not be read at all, as on a device that has not
-        /// been unlocked since it started. They may be fine, so they stay.
+        /// The files could not be read at all. They may be fine.
         case unreadable
     }
 
-    private func read() -> Saved {
+    private func readFiles() -> Saved {
         guard let pointer = data(at: currentURL) else { return .unreadable }
         guard let pointer, let version = ReleaseJSON.pointerVersion(from: pointer) else { return .damaged }
         guard let data = data(at: releaseURL(version)) else { return .unreadable }

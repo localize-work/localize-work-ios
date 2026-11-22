@@ -19,7 +19,8 @@ public enum LocalizeError: Error, Sendable, Equatable {
     case network(url: URL, message: String)
     /// A file arrived but is not the JSON object a published file is.
     case invalidFile(url: URL)
-    /// The downloaded release could not be written to the device.
+    /// A downloaded release that waits for the next launch could not be
+    /// written to the device.
     case cacheWriteFailed(String)
     /// A later ``Localize/configure(_:refresh:)`` call replaced this
     /// instance while its refresh was running. The refresh is dropped, and

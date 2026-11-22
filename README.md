@@ -147,10 +147,16 @@ To change the language while the app runs, call `Localize.configure` again with
 the new `locale`. The instance it replaces stops: a refresh it still has
 under way is dropped (its `refresh()` throws `replaced`, however far it got),
 so it cannot save over the new one, and it puts nothing more in use. The new
-instance goes on from what this run of the app reads of its project, also when
-that release could not be saved, and streams of `Localize.shared.updates` go on
-with it. A release the device could not take is used from memory, and the next
-refresh saves it.
+instance goes on from what this run of the app reads of its project, and
+streams of `Localize.shared.updates` go on with it.
+
+A release the device could not take is used from memory, and the next refresh
+saves it. With `.immediately` that is any release. With `.nextLaunch` it is
+more files of the release the run already reads; a newer release that cannot be
+saved cannot wait for the next launch, and `refresh()` throws
+`cacheWriteFailed`. A release in use from memory only is kept when `configure`
+is called again, with `.immediately` only while nothing is saved: a saved
+release is read first.
 
 A release is used whole or not at all. When the language has changed since the
 release on the device was saved, that release has no files for the new
@@ -175,7 +181,11 @@ release the app shows:
    `Localize.configure` is called again, and a run that started with nothing
    saved shows bundled strings to its end. That is kept for each project by
    itself: an app that configures another project and then the first one
-   again shows what it showed of the first one before.
+   again shows what it showed of the first one before. Saved files that cannot
+   be read when the app starts, as before the first unlock after the device
+   was restarted, are not "nothing saved": the SDK reads them again at the next
+   `configure` or `refresh()`, and what it finds then is the release of the
+   run.
 2. A release is read only once it has every file the language needs. A saved
    release that lacks files for the language, because the language changed
    before this launch or during the run, is still the release of this run: the
@@ -377,9 +387,14 @@ version. A refresh that finds nothing new costs one small request.
 - A pinned `version` that is not published yet makes `refresh()` fail (HTTP
   404) and saves nothing, so the release is picked up once it exists.
 - When a newer release is saved, older ones are deleted.
-- A saved release that cannot be read (a damaged or half-written file) is
-  deleted and treated as absent. The app shows bundled strings until the next
-  download.
+- A saved release that is damaged or half-written is deleted and treated as
+  absent. The app shows bundled strings until the next download. Files that
+  exist but cannot be opened at all, as before the first unlock after a
+  restart, are left alone and read again later.
+- The device holds one release of a project. A configuration pinned to a
+  `version` shares it with one that follows `latest.json`, so each saves its
+  own release over the other's. A refresh asks the device what it holds, and
+  saves again what is missing there, also when nothing newer is published.
 - A failed refresh leaves the release in use, and the saved one, as they
   were. One thing may have changed all the same: after a change of language,
   the files the release lacked for the new language are fetched from that same
@@ -400,7 +415,7 @@ version. A refresh that finds nothing new costs one small request.
 | `http(status:url:)` | The server answered with an error. | for 5xx |
 | `network(url:message:)` | No answer: offline or timed out. | yes |
 | `invalidFile` | A file is not the JSON it should be. | no |
-| `cacheWriteFailed` | The release could not be saved (only with `.nextLaunch`). | yes |
+| `cacheWriteFailed` | A release that waits for the next launch could not be saved (only with `.nextLaunch`). | yes |
 | `notConfigured` | `Localize.shared` was used before `Localize.configure`. | no |
 | `replaced` | A later `Localize.configure` call replaced this instance while its refresh was running. | no |
 
