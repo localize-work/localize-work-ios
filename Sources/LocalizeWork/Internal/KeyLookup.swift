@@ -11,7 +11,11 @@ enum KeyLookup {
     /// under its full dotted name is found: `a.b` beside a text `a` is stored
     /// as `{ "a": "…", "a.b": "…" }`.
     static func string(in file: [String: Node], key: String) -> String? {
-        let segments = key.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        // Split at the dot itself, not at a character: a segment that begins
+        // with a combining mark would otherwise stay joined to its dot.
+        let segments = key.unicodeScalars
+            .split(separator: ".", omittingEmptySubsequences: false)
+            .map { String(String.UnicodeScalarView($0)) }
         switch walk(file, segments) {
         case .string(let text)? where !text.isEmpty:
             return text

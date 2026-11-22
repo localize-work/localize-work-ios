@@ -41,11 +41,16 @@ public final class Localize: Sendable {
         // The instance being replaced may still be downloading. From here on
         // it saves nothing, so it cannot write its release over the new
         // instance's, and the new instance reads the device after that point.
-        commitLock.withLock { _ in
-            sharedInstance.withLock { $0 }?.retired.withLock { $0 = true }
+        // Retiring, reading the device and taking the old instance's place
+        // are one step under the lock that saves take: of two calls at the
+        // same time, the second retires the first one's instance.
+        let instance = commitLock.withLock { _ -> Localize in
+            let previous = sharedInstance.withLock { $0 }
+            previous?.retired.withLock { $0 = true }
+            let instance = Localize(configuration: configuration, continuing: previous)
+            sharedInstance.withLock { $0 = instance }
+            return instance
         }
-        let instance = Localize(configuration: configuration)
-        sharedInstance.withLock { $0 = instance }
         if refresh {
             Task {
                 do {
@@ -95,16 +100,24 @@ public final class Localize: Sendable {
         /// can be newer than `active`; after a change of language it can
         /// lack files, and is then not in use until they are downloaded.
         var saved: Release?
-        /// The version of the release this launch found on the device but
-        /// could not use, because it lacked files for the current language.
-        var incompleteAtStart: String?
+        /// The release this run of the app reads: `active`, or the one it
+        /// started from that still lacks files for the current language.
+        /// With the next-launch policy it is the only release this run
+        /// shows, so it is the one that missing files are added to.
+        var held: Release?
         var refresh: Task<LocalizeRefreshResult, Error>?
         var observers: [UUID: AsyncStream<String>.Continuation] = [:]
     }
 
     /// Creates an instance and loads the release saved on the device, if
     /// there is one. Nothing is downloaded until ``refresh()`` is called.
-    public init(configuration: LocalizeConfiguration) {
+    public convenience init(configuration: LocalizeConfiguration) {
+        self.init(configuration: configuration, continuing: nil)
+    }
+
+    /// - Parameter previous: The instance this one takes the place of while
+    ///   the app keeps running, as when the language is changed.
+    private init(configuration: LocalizeConfiguration, continuing previous: Localize?) {
         self.configuration = configuration
         localeChain = configuration.localeChain
         if configuration.projectSlug.isEmpty {
@@ -116,19 +129,27 @@ public final class Localize: Sendable {
         }
         // A saved release of another version than the pinned one is not the
         // release this configuration asks for.
-        let saved = store?.load().flatMap { release in
-            configuration.version == nil || release.version == configuration.version ? release : nil
+        let matchesPin: (Release) -> Bool = { release in
+            configuration.version == nil || release.version == configuration.version
+        }
+        let saved = store?.load().flatMap { matchesPin($0) ? $0 : nil }
+        // With the next-launch policy a running app keeps the release it
+        // started with. An instance that takes over from another one for the
+        // same project (a change of language) is still the same run of the
+        // app, so it reads that release, not the newer one saved meanwhile.
+        var started = saved
+        if configuration.updatePolicy == .nextLaunch,
+           let previous, let store, let theirs = previous.store,
+           theirs.directory == store.directory, theirs.source == store.source,
+           let release = previous.state.withLock({ $0.held }), matchesPin(release) {
+            started = release
         }
         // A release is used whole or not at all. After a change of language
         // the saved one lacks the new language's files: until they arrive the
         // app's bundled strings, which are in that language, are the better text.
         let needed = Self.neededFiles(localeChain, configuration.namespaces)
-        let active = saved.flatMap { $0.holds(needed) ? $0 : nil }
-        state = Locked(State(
-            active: active,
-            saved: saved,
-            incompleteAtStart: active == nil ? saved?.version : nil
-        ))
+        let active = started.flatMap { $0.holds(needed) ? $0 : nil }
+        state = Locked(State(active: active, saved: saved, held: started))
     }
 
     private static func neededFiles(_ localeChain: [String], _ namespaces: [String]) -> [FileKey] {
@@ -252,9 +273,9 @@ public final class Localize: Sendable {
         let needed = Self.neededFiles(localeChain, configuration.namespaces)
         // Files of a version never change, so the ones already here for this
         // version are reused and only the rest are downloaded.
-        let (active, saved, incompleteAtStart) = state.withLock { ($0.active, $0.saved, $0.incompleteAtStart) }
+        let (active, saved, held) = state.withLock { ($0.active, $0.saved, $0.held) }
         var files: [FileKey: [String: Node]] = [:]
-        for known in [saved, active] {
+        for known in [saved, active, held] {
             guard let known, known.version == version else { continue }
             for file in needed where files[file] == nil {
                 files[file] = known.files[file]
@@ -308,16 +329,52 @@ public final class Localize: Sendable {
         case .immediately:
             return await use(release) ? .updated(version: version) : .upToDate(version: version)
         case .nextLaunch:
-            if let active, active.hasSameContents(as: release) { return .upToDate(version: version) }
-            // The release this launch found on the device was not in use
-            // only because it lacked files for the current language. With
-            // them it is the release the launch started from, so it is used
-            // now: nothing the app has shown from a release changes.
-            if active == nil, incompleteAtStart == version {
-                return await use(release) ? .updated(version: version) : .upToDate(version: version)
+            if let held, held.version == version {
+                // The published release is the one this run started from.
+                // Files it lacked for the current language are added now:
+                // nothing the app has shown from the release changes.
+                let whole = held.adding(release.files)
+                return await use(whole) ? .updated(version: version) : .upToDate(version: version)
+            }
+            // A newer release waits for the next launch. Until then this run
+            // reads the one it started from, made whole from its own version
+            // when a change of language left it without some files.
+            if active == nil, let held, let whole = await completed(held, needed, loader) {
+                _ = await use(whole)
             }
             return .pendingNextLaunch(version: version)
         }
+    }
+
+    /// `release` with the files of `needed` it lacks, fetched from its own
+    /// version; nil when it cannot be made whole.
+    ///
+    /// When none of the missing files exists, the release may be gone from
+    /// the CDN, and reading it with empty files would show its fallback
+    /// language in place of the app's bundled strings. It is completed all
+    /// the same when every locale that lacks files is a regional form of a
+    /// language the release has texts for: a regional locale without
+    /// overrides of its own has no file, and that is normal.
+    private func completed(_ release: Release, _ needed: [FileKey], _ loader: ReleaseLoader) async -> Release? {
+        let missing = needed.filter { release.files[$0] == nil }
+        var files: [FileKey: [String: Node]] = [:]
+        var found = false
+        for file in missing {
+            do {
+                if let contents = try await loader.file(version: release.version, file: file) {
+                    found = true
+                    files[file] = contents
+                } else {
+                    // A file the version does not have is an empty file.
+                    files[file] = [:]
+                }
+            } catch {
+                // The release stays as it is; the next refresh tries again.
+                return nil
+            }
+        }
+        if !found, !Set(missing.map(\.locale)).allSatisfy({ release.hasTexts(inABaseOf: $0) }) { return nil }
+        return release.adding(files)
     }
 
     /// Makes `release` the one lookups read and announces it. False when it
@@ -326,6 +383,7 @@ public final class Localize: Sendable {
         let observers = state.withLock { state -> [AsyncStream<String>.Continuation]? in
             if let active = state.active, active.hasSameContents(as: release) { return nil }
             state.active = release
+            state.held = release
             return Array(state.observers.values)
         }
         guard let observers else { return false }

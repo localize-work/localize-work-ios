@@ -45,6 +45,24 @@ struct Release: Sendable {
         needed.allSatisfy { files[$0] != nil }
     }
 
+    /// This release with more files of the same version.
+    func adding(_ more: [FileKey: [String: Node]]) -> Release {
+        Release(version: version, files: files.merging(more) { held, _ in held })
+    }
+
+    /// Whether the release has texts in a shorter form of `locale`: for
+    /// `en-FI`, a file of `en` that is not empty. A regional locale of such a
+    /// language is complete without a file of its own.
+    func hasTexts(inABaseOf locale: String) -> Bool {
+        var parts = locale.split(separator: "-")
+        while parts.count > 1 {
+            parts.removeLast()
+            let base = parts.joined(separator: "-")
+            if files.contains(where: { $0.key.locale == base && !$0.value.isEmpty }) { return true }
+        }
+        return false
+    }
+
     /// Same version and same set of files. Files of a version never change,
     /// so this is enough to tell that nothing new would be shown.
     func hasSameContents(as other: Release) -> Bool {

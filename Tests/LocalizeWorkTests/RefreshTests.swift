@@ -594,6 +594,106 @@ final class RefreshTests: LocalizeTestCase {
         XCTAssertEqual(next.string("a"), "A2 auf Deutsch")
     }
 
+    /// A newer release waits, and the release the launch started with has
+    /// the new language on the CDN: its files are added, so the run shows
+    /// that release's own translations, not bundled strings.
+    func testNextLaunchPolicyCompletesTheReleaseInUseFromItsOwnVersion() async throws {
+        _ = try await loaded(["en/translation": ["a": "A"]])
+        stub.publish("v1", ["de/translation": ["a": "A auf Deutsch"]])
+        stub.setPointer("v2")
+        stub.publish("v2", ["en/translation": ["a": "A2"], "de/translation": ["a": "A2 auf Deutsch"]])
+        let german = Localize(configuration: configuration(locale: "de", fallback: "en", policy: .nextLaunch))
+        XCTAssertNil(german.version)
+        let updates = german.updates
+
+        let result = try await german.refresh()
+
+        XCTAssertEqual(result, .pendingNextLaunch(version: "v2"))
+        XCTAssertEqual(german.version, "v1")
+        XCTAssertEqual(german.string("a"), "A auf Deutsch")
+        let announced = await nextValue(of: updates)
+        XCTAssertEqual(announced, "v1")
+        XCTAssertEqual(savedFiles, ["current.json", "v2.json"])
+        // Asking again changes nothing and fetches nothing of v1 again.
+        let again = try await german.refresh()
+        XCTAssertEqual(again, .pendingNextLaunch(version: "v2"))
+        XCTAssertEqual(german.version, "v1")
+        XCTAssertEqual(stub.requestCount("/demo/v1/de/translation.json"), 1)
+        // The next launch reads v2.
+        let next = Localize(configuration: configuration(locale: "de", fallback: "en", policy: .nextLaunch))
+        XCTAssertEqual(next.string("a"), "A2 auf Deutsch")
+    }
+
+    /// A regional locale without overrides of its own has no file. The
+    /// release in use, which has its base language, is whole for it.
+    func testNextLaunchPolicyReadsTheReleaseInUseForARegionalLocaleWithoutOverrides() async throws {
+        _ = try await loaded(["en/translation": ["a": "A"]])
+        stub.setPointer("v2")
+        stub.publish("v2", ["en/translation": ["a": "A2"]])
+        let regional = Localize(configuration: configuration(locale: "en-FI", policy: .nextLaunch))
+        XCTAssertNil(regional.version)
+
+        let result = try await regional.refresh()
+
+        XCTAssertEqual(result, .pendingNextLaunch(version: "v2"))
+        XCTAssertEqual(regional.version, "v1")
+        XCTAssertEqual(regional.string("a"), "A")
+    }
+
+    /// A file of the release in use that cannot be fetched leaves that
+    /// release as it is: nothing is guessed to be empty.
+    func testNextLaunchPolicyDoesNotCompleteTheReleaseInUseWhenAFileCannotBeFetched() async throws {
+        _ = try await loaded(["en/translation": ["a": "A"]])
+        stub.setPointer("v2")
+        stub.publish("v2", ["en/translation": ["a": "A2"]])
+        stub.fail("/demo/v1/en-FI/translation.json")
+        let regional = Localize(configuration: configuration(locale: "en-FI", policy: .nextLaunch))
+
+        let result = try await regional.refresh()
+
+        XCTAssertEqual(result, .pendingNextLaunch(version: "v2"))
+        XCTAssertNil(regional.version)
+        XCTAssertEqual(regional.string("a"), "a")
+    }
+
+    /// Changing the language with `configure` is still the same run of the
+    /// app: a release that waits for the next launch keeps waiting.
+    func testNextLaunchPolicyKeepsTheReleaseInUseAcrossAChangeOfLanguage() async throws {
+        addTeardownBlock { Localize.resetShared() }
+        _ = try await loaded(["en/translation": ["a": "A"], "en-FI/translation": ["a": "A FI"]], locale: "en-FI")
+        let first = Localize.configure(configuration(locale: "en-FI", policy: .nextLaunch), refresh: false)
+        XCTAssertEqual(first.string("a"), "A FI")
+        stub.setPointer("v2")
+        stub.publish("v2", ["en/translation": ["a": "A2"], "et/translation": ["a": "A2 eesti keeles"]])
+        let pending = try await first.refresh()
+        XCTAssertEqual(pending, .pendingNextLaunch(version: "v2"))
+        XCTAssertEqual(savedFiles, ["current.json", "v2.json"])
+
+        // The user picks English; the release on screen has it.
+        let english = Localize.configure(configuration(locale: "en", policy: .nextLaunch), refresh: false)
+        XCTAssertEqual(english.version, "v1")
+        XCTAssertEqual(english.string("a"), "A")
+        let result = try await english.refresh()
+        XCTAssertEqual(result, .pendingNextLaunch(version: "v2"))
+        XCTAssertEqual(english.string("a"), "A")
+
+        // Then Estonian, which v1 does not have: bundled strings, not v2.
+        let estonian = Localize.configure(configuration(locale: "et", policy: .nextLaunch), refresh: false)
+        XCTAssertNil(estonian.version)
+        XCTAssertEqual(estonian.string("a"), "a")
+        _ = try await estonian.refresh()
+        XCTAssertNil(estonian.version)
+
+        // With the other policy the newest saved release is read at once.
+        let immediate = Localize.configure(configuration(locale: "et"), refresh: false)
+        XCTAssertEqual(immediate.string("a"), "A2 eesti keeles")
+
+        // A real launch starts from what is saved.
+        Localize.resetShared()
+        let relaunched = Localize.configure(configuration(locale: "et", policy: .nextLaunch), refresh: false)
+        XCTAssertEqual(relaunched.string("a"), "A2 eesti keeles")
+    }
+
     func testNextLaunchPolicyAppliesADownloadOnlyAtTheNextLaunch() async throws {
         stub.setPointer("v1")
         stub.publish("v1", ["en/translation": ["a": "v1"]])
@@ -820,6 +920,32 @@ final class RefreshTests: LocalizeTestCase {
         stub.goOffline()
         let relaunched = Localize(configuration: configuration(locale: "et"))
         XCTAssertEqual(relaunched.string("a"), "A eesti keeles")
+    }
+
+    /// Calls to `configure` at the same time: whichever instance ends up
+    /// replaced is retired, so only the shared one can still save.
+    func testConfigureCalledAtTheSameTimeRetiresEveryInstanceButTheLast() async throws {
+        addTeardownBlock { Localize.resetShared() }
+        stub.setPointer("v1")
+        stub.publish("v1", ["en/translation": ["a": "A"]])
+        for _ in 0..<20 {
+            let configuration = self.configuration()
+            let instances = await withTaskGroup(of: Localize.self) { group -> [Localize] in
+                for _ in 0..<8 {
+                    group.addTask { Localize.configure(configuration, refresh: false) }
+                }
+                var all: [Localize] = []
+                for await instance in group { all.append(instance) }
+                return all
+            }
+            let shared = Localize.shared
+            XCTAssertEqual(instances.filter { $0 === shared }.count, 1)
+            for instance in instances where instance !== shared {
+                await assertThrows(.replaced) { try await instance.refresh() }
+            }
+            let result = try await shared.refresh()
+            XCTAssertNotNil(result)
+        }
     }
 
     func testTheSharedInstance() async throws {

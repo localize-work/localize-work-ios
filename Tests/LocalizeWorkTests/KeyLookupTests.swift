@@ -9,6 +9,13 @@ final class KeyLookupTests: XCTestCase {
         XCTAssertEqual(KeyLookup.string(in: file, key: "nav.menu.close"), "Close")
     }
 
+    /// A name can begin with a combining mark, which a character-wise split
+    /// would leave attached to the dot before it.
+    func testAKeyIsSplitAtItsDots() {
+        let file = publishedFile("{ \"a\": { \"\u{301}b\": \"accent\" } }")
+        XCTAssertEqual(KeyLookup.string(in: file, key: "a.\u{301}b"), "accent")
+    }
+
     func testAMissingKeyIsNotFound() {
         let file = publishedFile(#"{ "nav": { "home": "Home" } }"#)
         XCTAssertNil(KeyLookup.string(in: file, key: "nav.away"))

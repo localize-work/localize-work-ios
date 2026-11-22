@@ -158,10 +158,16 @@ downloaded.
 With `.immediately` a release is used as soon as it is downloaded, so text can
 change while the app is open. With `.nextLaunch` the download is saved and used
 from the next launch, and nothing changes under a running app. On the very
-first launch that means bundled strings until the second launch. The one
-exception is a change of language: files that the release on the device lacks
-for the new language are added to it as soon as they are downloaded, since no
-text the app already shows from that release changes.
+first launch that means bundled strings until the second launch.
+
+A change of language does not end the run. With `.nextLaunch`, the app keeps
+the release it started with, also after `Localize.configure` is called again
+for another language, and a newer release that was downloaded meanwhile keeps
+waiting. Files that release lacks for the new language are fetched from that
+same release and added to it, since no text the app already shows from it
+changes. When it has no files for the new language at all, the app shows its
+bundled strings until the next launch. A regional locale such as `en-FI` needs
+no file of its own for this: the release's `en` texts are enough.
 
 ## Looking up strings
 
