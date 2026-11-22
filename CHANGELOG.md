@@ -23,7 +23,8 @@ The first release.
 - A saved release per project, loaded at start so strings are available at
   once and offline. It is used only when it has every file the current
   language needs and, with a pinned version, is that version. Older versions
-  are deleted; an unreadable saved release is discarded.
+  are deleted, and so is a damaged saved release; one that cannot be read at
+  the moment, as before the first unlock, is left alone and read again later.
 - `string(_:_:count:namespace:fallback:)`: i18next key lookup, including keys
   published under their full dotted name; plural forms looked up as i18next
   does, by CLDR 47 cardinal rules for whole numbers; `{{name}}` placeholders.

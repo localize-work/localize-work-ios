@@ -364,6 +364,10 @@ final class RefreshTests: LocalizeTestCase {
             ("pointer names no version", { try Data(#"{"version":"../../etc"}"#.utf8).write(to: current) }),
             ("pointer names a version that is not saved", { try Data(#"{"version":"v8"}"#.utf8).write(to: current) }),
             ("pointer is missing", { try FileManager.default.removeItem(at: current) }),
+            ("pointer is a folder", {
+                try FileManager.default.removeItem(at: current)
+                try FileManager.default.createDirectory(at: current, withIntermediateDirectories: false)
+            }),
         ]
         for (name, corrupt) in damage {
             try? FileManager.default.removeItem(at: cacheDirectory)
@@ -1019,8 +1023,10 @@ final class RefreshTests: LocalizeTestCase {
     /// of the device to start from: what it saved waits for the next launch.
     func testAReleaseSavedOverFilesThatCouldNotBeReadWaitsForTheNextLaunch() async throws {
         _ = try await loaded(["en/translation": ["a": "A"]])
-        let pointer = cacheDirectory.appendingPathComponent("demo").appendingPathComponent("current.json")
-        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: pointer.path)
+        // The release file, not the one that names it: a save puts a new
+        // file in its place, which the refresh after it can read.
+        let locked = cacheDirectory.appendingPathComponent("demo").appendingPathComponent("v1.json")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
         let localize = Localize(configuration: configuration(policy: .nextLaunch))
         stub.setPointer("v2")
         stub.publish("v2", ["en/translation": ["a": "A2"]])
@@ -1033,6 +1039,136 @@ final class RefreshTests: LocalizeTestCase {
         XCTAssertEqual(second, .pendingNextLaunch(version: "v2"))
         XCTAssertNil(localize.version)
         XCTAssertEqual(localize.string("a", fallback: "bundled"), "bundled")
+    }
+
+    /// The same when `configure` is called again straight after that save:
+    /// the run has written to the device, so there is nothing left of what
+    /// was there to look for, and what it wrote waits.
+    func testAReleaseSavedOverFilesThatCouldNotBeReadWaitsAfterConfigureIsCalledAgain() async throws {
+        addTeardownBlock { Localize.resetShared() }
+        _ = try await loaded(["en/translation": ["a": "A"]])
+        let locked = cacheDirectory.appendingPathComponent("demo").appendingPathComponent("v1.json")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+        let first = Localize.configure(configuration(policy: .nextLaunch), refresh: false)
+        XCTAssertNil(first.version)
+        stub.setPointer("v2")
+        stub.publish("v2", ["en/translation": ["a": "A2"], "de/translation": ["a": "A2 auf Deutsch"]])
+        let downloaded = try await first.refresh()
+        XCTAssertEqual(downloaded, .pendingNextLaunch(version: "v2"))
+        XCTAssertEqual(savedFiles, ["current.json", "v2.json"])
+
+        for locale in ["en", "de"] {
+            let again = Localize.configure(configuration(locale: locale, policy: .nextLaunch), refresh: false)
+            XCTAssertNil(again.version, locale)
+            XCTAssertEqual(again.string("a", fallback: "bundled"), "bundled", locale)
+            let result = try await again.refresh()
+            XCTAssertEqual(result, .pendingNextLaunch(version: "v2"), locale)
+            XCTAssertNil(again.version, locale)
+        }
+
+        Localize.resetShared()
+        stub.goOffline()
+        let relaunched = Localize.configure(configuration(locale: "de", policy: .nextLaunch), refresh: false)
+        XCTAssertEqual(relaunched.string("a"), "A2 auf Deutsch")
+    }
+
+    /// A refresh that reads the saved release at last and starts showing it
+    /// has changed the texts, whether or not anything newer is published.
+    func testARefreshThatStartsShowingTheSavedReleaseSaysSo() async throws {
+        for policy in [LocalizeUpdatePolicy.immediately, .nextLaunch] {
+            try? FileManager.default.removeItem(at: cacheDirectory)
+            stub = StubTransport()
+            _ = try await loaded(["en/translation": ["a": "A"]])
+            let pointer = cacheDirectory.appendingPathComponent("demo").appendingPathComponent("current.json")
+            try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: pointer.path)
+            let localize = Localize(configuration: configuration(policy: policy))
+            XCTAssertEqual(localize.string("a", fallback: "bundled"), "bundled")
+
+            try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: pointer.path)
+            let result = try await localize.refresh()
+
+            XCTAssertEqual(result, .updated(version: "v1"), "\(policy)")
+            XCTAssertEqual(localize.string("a"), "A")
+            // Nothing changes at the one after it.
+            let again = try await localize.refresh()
+            XCTAssertEqual(again, .upToDate(version: "v1"), "\(policy)")
+        }
+    }
+
+    /// A folder on the way to the saved files that cannot be entered hides
+    /// them just as a locked file does. That is not an empty device either.
+    func testASavedReleaseInAFolderThatCannotBeEnteredIsNotTakenForNone() async throws {
+        addTeardownBlock { Localize.resetShared() }
+        _ = try await loaded(["en/translation": ["a": "A"]])
+        stub.goOffline()
+        let project = cacheDirectory.appendingPathComponent("demo")
+        for closed in [cacheDirectory, project] {
+            Localize.resetShared()
+            try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: closed.path)
+            defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: closed.path) }
+            let locked = Localize.configure(configuration(policy: .nextLaunch), refresh: false)
+            XCTAssertNil(locked.version, closed.lastPathComponent)
+
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: closed.path)
+            let unlocked = Localize.configure(configuration(policy: .nextLaunch), refresh: false)
+
+            XCTAssertEqual(unlocked.version, "v1", closed.lastPathComponent)
+            XCTAssertEqual(unlocked.string("a"), "A", closed.lastPathComponent)
+            XCTAssertEqual(savedFiles, ["current.json", "v1.json"], closed.lastPathComponent)
+        }
+    }
+
+    /// A device with no folder for the project yet has nothing saved, which
+    /// the store can tell from one it cannot look into.
+    func testTheStoreTellsNothingSavedFromAFolderItCannotLookInto() throws {
+        let store = ReleaseStore(root: cacheDirectory, projectSlug: "demo", cdnBaseURL: URL(string: StubTransport.base)!)
+        guard case .nothing = store.read() else { return XCTFail("no folder at all is nothing saved") }
+        try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        guard case .nothing = store.read() else { return XCTFail("no project folder is nothing saved") }
+        try FileManager.default.createDirectory(at: store.directory, withIntermediateDirectories: true)
+        guard case .nothing = store.read() else { return XCTFail("an empty project folder is nothing saved") }
+
+        try FileManager.default.createDirectory(at: store.directory, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: cacheDirectory.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cacheDirectory.path) }
+        guard case .unreadable = store.read() else { return XCTFail("a folder that cannot be entered is unreadable") }
+
+        // A file where the folder should be holds nothing, and can be looked at.
+        let file = cacheDirectory.deletingLastPathComponent().appendingPathComponent("LocalizeWorkTests-file-\(UUID().uuidString)")
+        try Data().write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let blocked = ReleaseStore(root: file, projectSlug: "demo", cdnBaseURL: URL(string: StubTransport.base)!)
+        guard case .nothing = blocked.read() else { return XCTFail("a file in the folder's place is nothing saved") }
+    }
+
+    /// The same folder written another way is the same folder: the run goes
+    /// on from what it holds, and what it downloaded keeps waiting.
+    func testAnotherSpellingOfTheCacheFolderIsTheSameRun() async throws {
+        addTeardownBlock { Localize.resetShared() }
+        _ = try await loaded(["en/translation": ["a": "A1"]])
+        let first = Localize.configure(configuration(policy: .nextLaunch), refresh: false)
+        stub.setPointer("v2")
+        stub.publish("v2", ["en/translation": ["a": "A2"]])
+        let downloaded = try await first.refresh()
+        XCTAssertEqual(downloaded, .pendingNextLaunch(version: "v2"))
+
+        let link = cacheDirectory.deletingLastPathComponent()
+            .appendingPathComponent("LocalizeWorkTests-link-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: cacheDirectory)
+        defer { try? FileManager.default.removeItem(at: link) }
+        let spellings = [
+            URL(fileURLWithPath: cacheDirectory.path + "/."),
+            URL(fileURLWithPath: cacheDirectory.path + "/demo/.."),
+            URL(fileURLWithPath: cacheDirectory.path, isDirectory: false),
+            URL(fileURLWithPath: cacheDirectory.path, isDirectory: true),
+            link,
+        ]
+        for spelling in spellings {
+            var other = configuration(policy: .nextLaunch)
+            other.cacheDirectory = spelling
+            let again = Localize.configure(other, refresh: false)
+            XCTAssertEqual(again.string("a"), "A1", spelling.absoluteString)
+        }
     }
 
     func testAPinnedVersionThatIsNotPublishedYetIsNotSavedAsEmpty() async throws {

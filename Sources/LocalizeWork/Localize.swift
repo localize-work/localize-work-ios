@@ -52,7 +52,7 @@ public final class Localize: Sendable {
                 configuration: configuration,
                 store: store,
                 onDevice: store?.read() ?? .nothing,
-                run: store.map { RunKey(directory: $0.directory, source: $0.source, version: configuration.version) }
+                run: store.map { RunKey(folder: $0.folderIdentity, source: $0.source, version: configuration.version) }
             )
             // A view listens to `Localize.shared.updates` once, for as long
             // as it is on screen. Its stream goes on with the new instance.
@@ -98,7 +98,8 @@ public final class Localize: Sendable {
     /// What identifies the releases a configuration reads from the device:
     /// where they are kept, the CDN they came from, and the pinned version.
     private struct RunKey: Hashable {
-        let directory: URL
+        /// ``ReleaseStore/folderIdentity``.
+        let folder: String
         let source: String
         let version: String?
     }
@@ -116,8 +117,9 @@ public final class Localize: Sendable {
     /// one of those is still the same run. So the first `configure` of a
     /// project reads the device, and every later one goes on from what is
     /// kept here. A project whose saved files could not be read has no entry
-    /// yet: the run has not looked (``State/unread``). Read and written
-    /// under `commitLock`.
+    /// yet: the run has not looked (``State/unread``). It gets one when they
+    /// can be read, or when the run saves a release over them. Read and
+    /// written under `commitLock`.
     private static let runs = Locked<[RunKey: Run]>([:])
     private static let log = Logger(subsystem: "work.localize.sdk", category: "LocalizeWork")
 
@@ -154,7 +156,9 @@ public final class Localize: Sendable {
         /// on a device that has not been unlocked since it started. That is
         /// not a run that started with nothing: it could not look. The next
         /// refresh reads the device again, and what it finds then is the
-        /// release this run started with.
+        /// release this run started with. Once the instance has saved a
+        /// release over them there is nothing left to look for, and what it
+        /// saved waits for the next launch as any other download does.
         var unread = false
         var refresh: Task<LocalizeRefreshResult, Error>?
         /// The streams that hear of this instance's releases.
@@ -371,12 +375,16 @@ public final class Localize: Sendable {
             timeout: configuration.requestTimeout
         )
         let needed = Self.neededFiles(localeChain, configuration.namespaces)
-        try await startFromDevice(needed)
+        // Whether this refresh has put the release the run started with in
+        // use, before anything newer was looked for: read from the device at
+        // last, or made whole for the language. Lookups read other texts
+        // then, also when nothing newer is published.
+        var startedShowing = try await startFromDevice(needed)
         // First the release this run already reads. After a change of
         // language it lacks the new language's files; they come from that
         // same version, whatever is published now and whether or not the
         // pointer or a newer release can be reached.
-        let completedHeld = try await completeHeldRelease(needed, loader)
+        if try await completeHeldRelease(needed, loader) { startedShowing = true }
 
         // The pointer is read once. Every file below comes from the version
         // it named, whatever is published in the meantime. A version the
@@ -441,7 +449,7 @@ public final class Localize: Sendable {
         switch configuration.updatePolicy {
         case .immediately:
             let changed = try await use(release)
-            return changed || completedHeld ? .updated(version: version) : .upToDate(version: version)
+            return changed || startedShowing ? .updated(version: version) : .upToDate(version: version)
         case .nextLaunch:
             // The published release is used in this run only when it is the
             // version the run started with: files of that version are added
@@ -450,7 +458,7 @@ public final class Localize: Sendable {
             // keeps showing bundled strings.
             guard let held, held.version == version else { return .pendingNextLaunch(version: version) }
             let changed = try await use(held.adding(release.files))
-            return changed || completedHeld ? .updated(version: version) : .upToDate(version: version)
+            return changed || startedShowing ? .updated(version: version) : .upToDate(version: version)
         }
     }
 
@@ -483,6 +491,14 @@ public final class Localize: Sendable {
                 }
             }
             try store.save(whole)
+            // What was on the device before is gone now. A run that could
+            // not read it has nothing left to look for there, and what it
+            // holds by now is what it started with.
+            let (wasLooking, held) = state.withLock { state -> (Bool, Release?) in
+                defer { state.unread = false }
+                return (state.unread, state.held)
+            }
+            if wasLooking, let run { Self.runs.withLock { $0[run] = Run(held: held) } }
             return whole
         }
         state.withLock { $0.saved = onDevice }
@@ -491,8 +507,9 @@ public final class Localize: Sendable {
     /// Reads the device again when it could not be read as this instance was
     /// made (``State/unread``). What is there now is the release this run
     /// started with, and is put in use when it is whole for the language.
-    private func startFromDevice(_ needed: [FileKey]) async throws {
-        guard state.withLock({ $0.unread }) else { return }
+    /// True when that changed what lookups read.
+    private func startFromDevice(_ needed: [FileKey]) async throws -> Bool {
+        guard state.withLock({ $0.unread }) else { return false }
         let whole = try Self.commitLock.withLock { _ -> Release? in
             if retired.withLock({ $0 }) { throw LocalizeError.replaced }
             let found: Release?
@@ -503,17 +520,18 @@ public final class Localize: Sendable {
             }
             let held = state.withLock { state -> Release? in
                 state.unread = false
-                // Not what this run saved itself meanwhile, over files it
-                // never read: that waits for the next launch. Nor in place
-                // of a release it has put in use from memory.
-                if state.saved == nil, state.held == nil { state.held = found }
-                if state.saved == nil { state.saved = found }
+                // Not in place of a release the run has put in use from
+                // memory meanwhile. (One it saved itself is not found here:
+                // a save ends the looking, see `save`.)
+                if state.held == nil { state.held = found }
+                state.saved = found
                 return state.held
             }
             if let run { Self.runs.withLock { $0[run] = Run(held: held) } }
             return state.withLock { $0.active == nil ? held.flatMap { $0.holds(needed) ? $0 : nil } : nil }
         }
-        if let whole { _ = try await use(whole) }
+        guard let whole else { return false }
+        return try await use(whole)
     }
 
     /// Makes the release this run reads whole for the current language, from

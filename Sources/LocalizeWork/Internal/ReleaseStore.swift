@@ -21,12 +21,20 @@ struct ReleaseStore: Sendable {
         source = cdnBaseURL.absoluteString
     }
 
+    /// One name for the folder, however the configuration wrote its path:
+    /// with `/.` in it, through a symbolic link, with or without a slash at
+    /// the end. Two configurations with the same one share the saved files.
+    var folderIdentity: String {
+        directory.standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
     /// What the device holds for this project.
     enum Stored {
         case release(Release)
         case nothing
-        /// The files are there but cannot be read now, as on a device that
-        /// has not been unlocked since it started. That says nothing about
+        /// The files cannot be looked at now: they are locked, as on a
+        /// device that has not been unlocked since it started, or a folder
+        /// on the way to them cannot be entered. That says nothing about
         /// what they hold, so they stay, and are worth reading again later.
         case unreadable
     }
@@ -34,7 +42,9 @@ struct ReleaseStore: Sendable {
     /// What is saved. A saved release that is damaged or incomplete is
     /// deleted and counts as nothing.
     func read() -> Stored {
-        guard FileManager.default.fileExists(atPath: directory.path) else { return .nothing }
+        // Not `fileExists` first: it answers "no" for a folder it cannot
+        // look into, which is not a folder that is not there. Reading the
+        // file tells the two apart.
         switch readFiles() {
         case .release(let release):
             return .release(release)
@@ -89,9 +99,10 @@ struct ReleaseStore: Sendable {
 
     private enum Saved {
         case release(Release)
-        /// Not a complete, valid release of this project.
+        /// Not a complete, valid release of this project. No folder at all
+        /// is one case of it.
         case damaged
-        /// The files could not be read at all. They may be fine.
+        /// The files could not be looked at. They may be fine.
         case unreadable
     }
 
@@ -118,14 +129,22 @@ struct ReleaseStore: Sendable {
         return .release(Release(version: version, files: files))
     }
 
-    /// A file's bytes; `.some(nil)` when the file does not exist, and nil
-    /// when it exists but cannot be read.
+    /// A file's bytes; `.some(nil)` when no file is there, and nil when
+    /// that cannot be told: the file is locked, or a folder on the way to it
+    /// cannot be entered.
     private func data(at url: URL) -> Data?? {
         do {
             return .some(try Data(contentsOf: url))
-        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
-            return .some(nil)
         } catch {
+            // The system's own reason says more than Foundation's code,
+            // which is "unknown" for half of these. No such file, a folder on
+            // the way that is a file, a folder where the file should be: in
+            // each of them the path was looked at and holds no file.
+            let reason = (error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError
+            if let reason, reason.domain == NSPOSIXErrorDomain, [ENOENT, ENOTDIR, EISDIR].contains(Int32(reason.code)) {
+                return .some(nil)
+            }
+            if let error = error as? CocoaError, error.code == .fileReadNoSuchFile { return .some(nil) }
             return nil
         }
     }

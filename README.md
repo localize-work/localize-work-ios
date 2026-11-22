@@ -185,7 +185,8 @@ release the app shows:
    be read when the app starts, as before the first unlock after the device
    was restarted, are not "nothing saved": the SDK reads them again at the next
    `configure` or `refresh()`, and what it finds then is the release of the
-   run.
+   run. Unless the run has saved a release over them by then: that one was
+   downloaded in this run, and waits for the next launch like any other.
 2. A release is read only once it has every file the language needs. A saved
    release that lacks files for the language, because the language changed
    before this launch or during the run, is still the release of this run: the
@@ -371,7 +372,11 @@ try await Localize.shared.refresh()
 ```
 
 It returns `.updated`, `.upToDate` or `.pendingNextLaunch`, each with the
-version. A refresh that finds nothing new costs one small request.
+version. `.updated` says that lookups read other strings now, so it is the one
+to redraw on. That is a new release in use, and also the release the run
+started with when this refresh made it usable: it fetched the files it lacked
+for the language, or could read it from the device at last. A refresh that
+finds nothing new costs one small request.
 
 ## Offline behaviour
 
@@ -389,10 +394,13 @@ version. A refresh that finds nothing new costs one small request.
 - When a newer release is saved, older ones are deleted.
 - A saved release that is damaged or half-written is deleted and treated as
   absent. The app shows bundled strings until the next download. Files that
-  exist but cannot be opened at all, as before the first unlock after a
-  restart, are left alone and read again later.
-- The device holds one release of a project. A configuration pinned to a
-  `version` shares it with one that follows `latest.json`, so each saves its
+  cannot be looked at, because they are locked, as before the first unlock
+  after a restart, or because a folder on the way to them cannot be entered,
+  are left alone and read again later.
+- The device holds one release of a project, in its folder under
+  `cacheDirectory`. The same folder written another way, through a symbolic
+  link or with `/.` in the path, is the same folder. A configuration pinned to
+  a `version` shares it with one that follows `latest.json`, so each saves its
   own release over the other's. A refresh asks the device what it holds, and
   saves again what is missing there, also when nothing newer is published.
 - A failed refresh leaves the release in use, and the saved one, as they

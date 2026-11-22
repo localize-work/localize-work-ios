@@ -67,9 +67,12 @@ extension LocalizeError: LocalizedError {
 
 /// What a successful refresh did.
 public enum LocalizeRefreshResult: Sendable, Equatable {
-    /// The release in use is already the published one. Nothing changed.
+    /// The release in use is already the published one, and lookups read
+    /// what they read before.
     case upToDate(version: String)
-    /// A newly downloaded release is now in use.
+    /// Lookups read other texts now. A newly downloaded release is in use;
+    /// or the one this run started with is, which lacked files for the
+    /// language or could not be read from the device until now.
     case updated(version: String)
     /// A newly downloaded release is saved and takes effect at the next
     /// launch. Only with ``LocalizeUpdatePolicy/nextLaunch``.
