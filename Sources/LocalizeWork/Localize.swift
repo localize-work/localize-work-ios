@@ -47,7 +47,10 @@ public final class Localize: Sendable {
         let instance = commitLock.withLock { _ -> Localize in
             let previous = sharedInstance.withLock { $0 }
             previous?.retired.withLock { $0 = true }
-            let instance = Localize(configuration: configuration, continuing: previous)
+            let store = storeFor(configuration)
+            let instance = Localize(
+                configuration: configuration, store: store, saved: store?.load(), continuing: previous
+            )
             // A view listens to `Localize.shared.updates` once, for as long
             // as it is on screen. Its stream goes on with the new instance.
             instance.takeOverStreams(of: previous ?? unconfigured)
@@ -79,8 +82,13 @@ public final class Localize: Sendable {
     private static let sharedInstance = Locked<Localize?>(nil)
     /// Held while a release is saved, and while an instance is retired, so
     /// an instance that was replaced never saves after its replacement began.
+    /// Held while the device is read, too: a save writes the release before
+    /// the file that names it, and a reader that came between the two would
+    /// take the folder for a damaged one and delete it.
     private static let commitLock = Locked<Void>(())
-    private static let unconfigured = Localize(configuration: LocalizeConfiguration(projectSlug: ""))
+    private static let unconfigured = Localize(
+        configuration: LocalizeConfiguration(projectSlug: ""), store: nil, saved: nil, continuing: nil
+    )
     private static let log = Logger(subsystem: "work.localize.sdk", category: "LocalizeWork")
 
     // MARK: Instance
@@ -117,27 +125,39 @@ public final class Localize: Sendable {
     /// Creates an instance and loads the release saved on the device, if
     /// there is one. Nothing is downloaded until ``refresh()`` is called.
     public convenience init(configuration: LocalizeConfiguration) {
-        self.init(configuration: configuration, continuing: nil)
+        let store = Self.storeFor(configuration)
+        let saved = Self.commitLock.withLock { _ in store?.load() }
+        self.init(configuration: configuration, store: store, saved: saved, continuing: nil)
     }
 
-    /// - Parameter previous: The instance this one takes the place of while
-    ///   the app keeps running, as when the language is changed.
-    private init(configuration: LocalizeConfiguration, continuing previous: Localize?) {
+    /// Where the releases of this configuration's project are kept; nil
+    /// when there is no project or no folder to keep them in.
+    private static func storeFor(_ configuration: LocalizeConfiguration) -> ReleaseStore? {
+        if configuration.projectSlug.isEmpty { return nil }
+        return (configuration.cacheDirectory ?? ReleaseStore.defaultRoot()).map {
+            ReleaseStore(root: $0, projectSlug: configuration.projectSlug, cdnBaseURL: configuration.cdnBaseURL)
+        }
+    }
+
+    /// - Parameters:
+    ///   - onDevice: What `store` holds, read under `commitLock`.
+    ///   - previous: The instance this one takes the place of while the app
+    ///     keeps running, as when the language is changed.
+    private init(
+        configuration: LocalizeConfiguration,
+        store: ReleaseStore?,
+        saved onDevice: Release?,
+        continuing previous: Localize?
+    ) {
         self.configuration = configuration
         localeChain = configuration.localeChain
-        if configuration.projectSlug.isEmpty {
-            store = nil
-        } else {
-            store = (configuration.cacheDirectory ?? ReleaseStore.defaultRoot()).map {
-                ReleaseStore(root: $0, projectSlug: configuration.projectSlug, cdnBaseURL: configuration.cdnBaseURL)
-            }
-        }
+        self.store = store
         // A saved release of another version than the pinned one is not the
         // release this configuration asks for.
         let matchesPin: (Release) -> Bool = { release in
             configuration.version == nil || release.version == configuration.version
         }
-        let saved = store?.load().flatMap { matchesPin($0) ? $0 : nil }
+        let saved = onDevice.flatMap { matchesPin($0) ? $0 : nil }
         // An instance that takes over from another one for the same project
         // (a change of language) is still the same run of the app, and goes
         // on from the release that one held.
@@ -274,14 +294,17 @@ public final class Localize: Sendable {
             if let running = state.refresh { return running }
             let task = Task { [self] in
                 defer { self.state.withLock { $0.refresh = nil } }
+                // However the refresh of an instance that was replaced
+                // meanwhile ended, well or not, its caller hears one thing:
+                // that it was replaced. This is the one place that says so.
+                let outcome: Result<LocalizeRefreshResult, Error>
                 do {
-                    return try await performRefresh()
+                    outcome = .success(try await performRefresh())
                 } catch {
-                    // Whatever went wrong for an instance that was replaced
-                    // meanwhile, its caller should hear that it was replaced.
-                    if retired.withLock({ $0 }) { throw LocalizeError.replaced }
-                    throw error
+                    outcome = .failure(error)
                 }
+                if retired.withLock({ $0 }) { throw LocalizeError.replaced }
+                return try outcome.get()
             }
             state.refresh = task
             return task
@@ -430,18 +453,21 @@ public final class Localize: Sendable {
     /// `release` with the files of `needed` it lacks, fetched from its own
     /// version; nil when it cannot be made whole.
     ///
-    /// When none of the missing files of the language asked for exists, the
-    /// release may be gone from the CDN, or have nothing in that language,
-    /// and reading it with empty files would show its fallback language in
-    /// place of the app's bundled strings. A file of the fallback locale
-    /// says nothing about that. The release is completed all the same when
-    /// it already has texts for every locale of the language that lacks
-    /// files, in that locale or a shorter form of it: a regional locale
-    /// without overrides of its own has no file, and that is normal.
+    /// Nothing has named this release as the published one. If it answers
+    /// "not found" for the language asked for, it may be gone from the CDN,
+    /// or have nothing in that language, and reading it with empty files
+    /// would show its fallback language in place of the app's bundled
+    /// strings. So when a file of the locale asked for or of its shorter
+    /// forms is missing, the release must have shown that it has the
+    /// language: one of those files was found now, or it already has texts
+    /// in one of them, in the namespaces the app asks for. A file of the
+    /// fallback locale shows nothing of the kind. With that shown, a file it
+    /// does not have is an empty one, as for a regional locale without
+    /// overrides of its own or a namespace the language has no texts in.
     private func completed(_ release: Release, _ needed: [FileKey], _ loader: ReleaseLoader) async -> Release? {
         let missing = needed.filter { release.files[$0] == nil }
         // The locale asked for and its shorter forms, without the fallback locale.
-        let asked = Set(LocaleCode.chain(locale: configuration.locale, fallback: nil))
+        let asked = LocaleCode.chain(locale: configuration.locale, fallback: nil)
         var files: [FileKey: [String: Node]] = [:]
         var found = false
         for file in missing {
@@ -458,8 +484,8 @@ public final class Localize: Sendable {
                 return nil
             }
         }
-        let lacking = Set(missing.map(\.locale)).intersection(asked)
-        if !found, !lacking.allSatisfy({ release.hasTexts(for: $0) }) { return nil }
+        let lacksAsked = missing.contains { asked.contains($0.locale) }
+        if lacksAsked, !found, !release.hasTexts(in: asked, namespaces: configuration.namespaces) { return nil }
         return release.adding(files)
     }
 

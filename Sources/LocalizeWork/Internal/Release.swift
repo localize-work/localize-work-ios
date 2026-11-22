@@ -50,17 +50,13 @@ struct Release: Sendable {
         Release(version: version, files: files.merging(more) { held, _ in held })
     }
 
-    /// Whether the release has texts in `locale` or a shorter form of it:
-    /// for `en-FI`, a file of `en-FI` or `en` that is not empty. Such a
-    /// locale is complete without a file of its own for every namespace.
-    func hasTexts(for locale: String) -> Bool {
-        var parts = locale.split(separator: "-")
-        while !parts.isEmpty {
-            let form = parts.joined(separator: "-")
-            if files.contains(where: { $0.key.locale == form && !$0.value.isEmpty }) { return true }
-            parts.removeLast()
+    /// Whether the release has texts in one of `locales`, in one of
+    /// `namespaces`: a file that is not empty. Texts in a namespace the app
+    /// no longer asks for say little about the ones it does.
+    func hasTexts(in locales: [String], namespaces: [String]) -> Bool {
+        locales.contains { locale in
+            namespaces.contains { files[FileKey(locale: locale, namespace: $0)]?.isEmpty == false }
         }
-        return false
     }
 
     /// Same version and same set of files. Files of a version never change,

@@ -144,9 +144,9 @@ a file the release does not have counts as empty, and the strings come from
 `en`.
 
 To change the language while the app runs, call `Localize.configure` again with
-the new `locale`. The instance it replaces stops: a download it still has
-under way is dropped (its `refresh()` throws `replaced`), so it cannot save
-over the new one, and it puts nothing more in use. The new instance goes on from the release that one held,
+the new `locale`. The instance it replaces stops: a refresh it still has
+under way is dropped (its `refresh()` throws `replaced`, however far it got),
+so it cannot save over the new one, and it puts nothing more in use. The new instance goes on from the release that one held,
 also when that release could not be saved, and streams of
 `Localize.shared.updates` go on with it.
 
@@ -197,9 +197,13 @@ depends on whether the release is known to be the published one:
   strings are in the user's language. A file of the fallback locale does not
   count as an answer here: it says nothing about the new language.
 
-A regional locale such as `en-FI` needs no file of its own for any of this:
-the release's `en` texts are enough. The same goes for a namespace the release
-has no file for in a language it otherwise has texts in.
+In that second case one thing decides whether the release has the language: a
+file of the locale, or of a shorter form of it, was found, or the release
+already has texts in one of them, in one of the configured `namespaces`. So a
+regional locale such as `en-FI` needs no file of its own: the release's `en`
+texts are enough. Nor does a namespace need a file in a language the release
+has texts in elsewhere. Texts in a namespace the app no longer lists do not
+count.
 
 ## Looking up strings
 
@@ -394,7 +398,7 @@ version. A refresh that finds nothing new costs one small request.
 | `invalidFile` | A file is not the JSON it should be. | no |
 | `cacheWriteFailed` | The release could not be saved (only with `.nextLaunch`). | yes |
 | `notConfigured` | `Localize.shared` was used before `Localize.configure`. | no |
-| `replaced` | A later `Localize.configure` call replaced this instance while it was downloading. | no |
+| `replaced` | A later `Localize.configure` call replaced this instance while its refresh was running. | no |
 
 `error.isRetryable` gives the last column. The SDK does not retry by itself:
 call `refresh()` again when it suits your app.

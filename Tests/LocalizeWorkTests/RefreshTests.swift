@@ -725,6 +725,44 @@ final class RefreshTests: LocalizeTestCase {
         XCTAssertEqual(more.string("a"), "A in italiano")
     }
 
+    /// The release has texts of the regional locale and none of its base
+    /// language. A namespace added by an app update has no file in either:
+    /// the release is still read, since it has the language.
+    func testAReleaseWithTextsOfARegionalLocaleOnlyIsCompletedForANamespaceItLacks() async throws {
+        _ = try await loaded(["fr-CA/translation": ["a": "A canadien"]], locale: "fr-CA")
+        stub.respond(stub.pointerPath, status: 503)
+        let more = Localize(configuration: configuration(locale: "fr-CA", namespaces: ["translation", "extra"]))
+        XCTAssertNil(more.version)
+        do {
+            try await more.refresh()
+            XCTFail("expected the refresh to fail without the pointer")
+        } catch {}
+        XCTAssertEqual(more.version, "v1")
+        XCTAssertEqual(more.string("a", fallback: "A (groupé)"), "A canadien")
+    }
+
+    /// Texts of the language in a namespace the app no longer asks for say
+    /// little about the namespaces it does ask for: they do not make a
+    /// release nothing has named readable in the fallback locale.
+    func testTextsInANamespaceThatIsNotConfiguredDoNotVouchForARelease() async throws {
+        _ = try await loaded(
+            [
+                "fr/onboarding": ["a": "Bienvenue"],
+                "en/onboarding": ["a": "Welcome"],
+                "en/translation": ["a": "A english"],
+            ],
+            locale: "fr", fallback: "en", namespaces: ["onboarding"]
+        )
+        stub.respond(stub.pointerPath, status: 503)
+        let french = Localize(configuration: configuration(locale: "fr", fallback: "en"))
+        do {
+            try await french.refresh()
+            XCTFail("expected the refresh to fail without the pointer")
+        } catch {}
+        XCTAssertNil(french.version)
+        XCTAssertEqual(french.string("a", fallback: "A (groupé)"), "A (groupé)")
+    }
+
     /// A pinned version is named by the configuration, as `latest.json`
     /// names the latest one: a language it has no file for reads the
     /// fallback locale, without the pointer.
@@ -1232,6 +1270,59 @@ final class RefreshTests: LocalizeTestCase {
         let heard = await nextValue(of: updates, timeout: 0.2)
         XCTAssertNil(heard)
         XCTAssertNil(german.version)
+    }
+
+    /// Replaced while a refresh that has nothing left to save waits for the
+    /// pointer: the release it would report is already saved for the next
+    /// launch. Its caller still hears that the instance was replaced.
+    func testAReplacedInstanceReportsNothingButThatItWasReplaced() async throws {
+        addTeardownBlock { Localize.resetShared() }
+        stub.setPointer("v1")
+        stub.publish("v1", ["en/translation": ["a": "A"]])
+        let first = Localize.configure(configuration(policy: .nextLaunch), refresh: false)
+        let downloaded = try await first.refresh()
+        XCTAssertEqual(downloaded, .pendingNextLaunch(version: "v1"))
+
+        let gate = Gate()
+        stub.afterEachRequest { path in
+            if path == "/demo/latest.json" { await gate.wait() }
+        }
+        let stalled = Task { try await first.refresh() }
+        while stub.requestCount("/demo/latest.json") < 2 { await Task.yield() }
+        _ = Localize.configure(configuration(policy: .nextLaunch), refresh: false)
+        await gate.open()
+
+        do {
+            let result = try await stalled.value
+            XCTFail("expected the replaced instance to stop, got \(result)")
+        } catch let error as LocalizeError {
+            XCTAssertEqual(error, .replaced)
+        }
+    }
+
+    /// Two instances of one project, one saving its first release while the
+    /// other is created. The folder is there before `current.json` is: the
+    /// new instance must not take that for a damaged cache and delete it
+    /// under the save.
+    func testAnInstanceCreatedDuringASaveDoesNotDeleteWhatIsBeingSaved() async throws {
+        stub.setPointer("v1")
+        stub.publish("v1", ["en/translation": ["a": "A"]])
+        for round in 0..<40 {
+            try? FileManager.default.removeItem(at: cacheDirectory)
+            let configuration = self.configuration(policy: .nextLaunch)
+            let saving = Localize(configuration: configuration)
+            let finished = Locked(false)
+            let others = Task.detached {
+                while !finished.withLock({ $0 }) {
+                    _ = Localize(configuration: configuration)
+                }
+            }
+            let result = try await saving.refresh()
+            finished.withLock { $0 = true }
+            await others.value
+            XCTAssertEqual(result, .pendingNextLaunch(version: "v1"), "round \(round)")
+            XCTAssertEqual(savedFiles, ["current.json", "v1.json"], "round \(round)")
+        }
     }
 
     /// Calls to `configure` at the same time: whichever instance ends up

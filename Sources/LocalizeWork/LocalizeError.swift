@@ -22,7 +22,8 @@ public enum LocalizeError: Error, Sendable, Equatable {
     /// The downloaded release could not be written to the device.
     case cacheWriteFailed(String)
     /// A later ``Localize/configure(_:refresh:)`` call replaced this
-    /// instance while it was downloading. Its download is dropped.
+    /// instance while its refresh was running. The refresh is dropped, and
+    /// however far it got, this is what its caller hears.
     case replaced
 
     /// Whether trying again later can succeed without changing anything.
