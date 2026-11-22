@@ -11,13 +11,14 @@ enum BundledStrings {
         namespace: String,
         bundle: Bundle,
         arguments: LocalizeArguments,
-        count: Int?
+        count: Int?,
+        device: Locale = .current
     ) -> String? {
         guard !key.isEmpty else { return nil }
         for table in [namespace, nil] {
             let found = bundle.localizedString(forKey: key, value: missing, table: table)
             if found != missing {
-                return fill(found, arguments: arguments, count: count, locale: formatLocale(of: bundle))
+                return fill(found, arguments: arguments, count: count, locale: formatLocale(of: bundle, device: device))
             }
         }
         return nil
@@ -79,16 +80,28 @@ enum BundledStrings {
     }
 
     /// The locale to format a string of `bundle` with. Foundation picks the
-    /// plural form by this locale's language, so it has to be the language
-    /// the string is written in, which is not the device's when the app has
-    /// no localization for the device's language.
-    static func formatLocale(of bundle: Bundle) -> Locale {
+    /// plural form by this locale, so it has to be the language the string
+    /// is written in, which is not the device's when the app has no
+    /// localization for the device's language.
+    static func formatLocale(of bundle: Bundle, device: Locale = .current) -> Locale {
         var localization = bundle.preferredLocalizations.first ?? "en"
         if localization == "Base" { localization = bundle.developmentLocalization ?? "en" }
         let written = Locale(identifier: localization)
-        // Same language: keep the device's locale, and with it the region's
-        // way of writing numbers.
-        return language(of: written) == language(of: .current) ? .current : written
+        guard language(of: written) == language(of: device) else { return written }
+        // The same language can count differently by region: zero is
+        // singular in Brazilian Portuguese and plural in European. A string
+        // written for one keeps its own rule on a device set to the other.
+        guard PluralRules.family(for: tag(of: written)) == PluralRules.family(for: tag(of: device)) else {
+            return written
+        }
+        // Otherwise the device's locale, and with it the region's way of
+        // writing numbers.
+        return device
+    }
+
+    /// The identifier without what follows an `@`: `pt_PT` of `pt_PT@calendar=…`.
+    private static func tag(of locale: Locale) -> String {
+        String(locale.identifier.split(separator: "@").first ?? "")
     }
 
     private static func language(of locale: Locale) -> String {

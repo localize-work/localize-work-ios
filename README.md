@@ -146,7 +146,9 @@ a file the release does not have counts as empty, and the strings come from
 To change the language while the app runs, call `Localize.configure` again with
 the new `locale`. The instance it replaces stops: a download it still has
 under way is dropped (its `refresh()` throws `replaced`), so it cannot save
-over the new one.
+over the new one. The new instance goes on from the release that one held,
+also when that release could not be saved, and streams of
+`Localize.shared.updates` go on with it.
 
 A release is used whole or not at all. When the language has changed since the
 release on the device was saved, that release has no files for the new
@@ -178,9 +180,20 @@ release the app shows:
    next launch, with `.immediately` it is used once it is complete. If it
    cannot be downloaded, `refresh()` throws, and step 2 still holds.
 
-When the release has no files for the new language at all, the app shows its
-bundled strings until the next launch. A regional locale such as `en-FI` needs
-no file of its own for this: the release's `en` texts are enough.
+A release may have no file at all for the new language. What happens then
+depends on whether the release is known to be the published one:
+
+- Once `latest.json` has named that release, it is read like any other: a file
+  it does not have counts as empty, and the strings come from the fallback
+  locale. A launch in that language reads the same.
+- Until then the app shows its bundled strings. That is while `latest.json`
+  cannot be read, and with `.nextLaunch` also while it names a newer release,
+  which waits for the next launch. A release that answers "not found" for every
+  file of a language may also be one the CDN no longer keeps, and the bundled
+  strings are in the user's language.
+
+A regional locale such as `en-FI` needs no file of its own for any of this:
+the release's `en` texts are enough.
 
 ## Looking up strings
 
@@ -285,8 +298,10 @@ A bundled string may also be written with `{{name}}` placeholders, and is then
 filled like a published one.
 
 The plural form of a bundled string follows the language the string is written
-in. Bundled strings come in the language iOS picks for your app, which can
-differ from `locale` if you set that yourself.
+in, and where a region counts differently, the region it is written for: a
+`pt-PT` table counts as European Portuguese does on a device set to Brazil.
+Bundled strings come in the language iOS picks for your app, which can differ
+from `locale` if you set that yourself.
 
 ## Updating the screen when a release arrives
 
@@ -310,6 +325,9 @@ struct ContentView: View {
     }
 }
 ```
+
+The loop keeps running when `Localize.configure` is called again: the stream
+then tells of the new instance's releases.
 
 UIKit, with a notification, posted on the main thread:
 

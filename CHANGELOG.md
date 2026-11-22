@@ -30,6 +30,7 @@ The first release.
 - Fallback to the app's bundled strings, with the values filled into format
   specifiers and the plural form chosen from a string catalog's variations.
 - `updates` (an `AsyncStream`) and `Localize.didUpdateNotification`, sent when
-  a downloaded release starts being used.
+  a downloaded release starts being used. A stream of `Localize.shared` goes on
+  when `configure` is called again.
 - `LocalizeUpdatePolicy`: apply a download immediately, or at the next launch.
 - `LocalizeTransport`, to replace the network in tests.

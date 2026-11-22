@@ -5,10 +5,11 @@ import XCTest
 /// written the way a compiled string catalog is laid out, including the
 /// plural entries of localize.work's `.xcstrings` export.
 final class BundledStringsTests: LocalizeTestCase {
-    private var bundleDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
+    private var bundleDirectories: [URL] = []
 
     override func tearDown() {
-        try? FileManager.default.removeItem(at: bundleDirectory)
+        for directory in bundleDirectories { try? FileManager.default.removeItem(at: directory) }
+        bundleDirectories = []
         super.tearDown()
     }
 
@@ -18,8 +19,9 @@ final class BundledStringsTests: LocalizeTestCase {
         plurals: [String: [String: Any]] = [:],
         localization: String = "en"
     ) throws -> Bundle {
-        bundleDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
+        let bundleDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("LocalizeWorkBundle-\(UUID().uuidString).bundle", isDirectory: true)
+        bundleDirectories.append(bundleDirectory)
         let lproj = bundleDirectory.appendingPathComponent("\(localization).lproj", isDirectory: true)
         try FileManager.default.createDirectory(at: lproj, withIntermediateDirectories: true)
         for (table, entries) in strings {
@@ -222,6 +224,50 @@ final class BundledStringsTests: LocalizeTestCase {
         XCTAssertEqual(localize.string("items", count: 3), "3 предмета")
         XCTAssertEqual(localize.string("items", count: 5), "5 предметов")
         XCTAssertEqual(localize.string("items", count: 21), "21 предмет")
+    }
+
+    /// European and Brazilian Portuguese count zero differently. A table
+    /// written for one keeps its rule on a device set to the other.
+    func testABundledPluralFollowsTheRegionOfItsTable() throws {
+        let brazil = Locale(identifier: "pt_BR")
+        let portugal = Locale(identifier: "pt_PT")
+        func text(_ bundle: Bundle, _ count: Int, _ device: Locale) -> String? {
+            BundledStrings.string(
+                key: "files", namespace: "translation", bundle: bundle, arguments: [:], count: count, device: device
+            )
+        }
+
+        let european = try makeBundle(
+            strings: [:],
+            plurals: ["Localizable": [
+                "files": plural("%#@value@", "value", ["one": "%lld ficheiro", "other": "%lld ficheiros"]),
+            ]],
+            localization: "pt-PT"
+        )
+        XCTAssertEqual(european.preferredLocalizations.first, "pt-PT")
+        XCTAssertEqual(text(european, 0, brazil), "0 ficheiros")
+        XCTAssertEqual(text(european, 1, brazil), "1 ficheiro")
+        XCTAssertEqual(text(european, 0, portugal), "0 ficheiros")
+        XCTAssertEqual(BundledStrings.formatLocale(of: european, device: brazil).identifier, "pt-PT")
+        XCTAssertEqual(BundledStrings.formatLocale(of: european, device: portugal), portugal)
+
+        let brazilian = try makeBundle(
+            strings: [:],
+            plurals: ["Localizable": [
+                "files": plural("%#@value@", "value", ["one": "%lld arquivo", "other": "%lld arquivos"]),
+            ]],
+            localization: "pt"
+        )
+        XCTAssertEqual(text(brazilian, 0, portugal), "0 arquivo")
+        XCTAssertEqual(text(brazilian, 0, brazil), "0 arquivo")
+        XCTAssertEqual(text(brazilian, 2, portugal), "2 arquivos")
+
+        // Regions that count alike: the device's locale, and with it the
+        // region's way of writing numbers.
+        let british = try makeBundle(strings: ["Localizable": ["a": "A"]], localization: "en-GB")
+        let finland = Locale(identifier: "en_FI")
+        XCTAssertEqual(BundledStrings.formatLocale(of: british, device: finland), finland)
+        XCTAssertEqual(BundledStrings.formatLocale(of: british, device: brazil).identifier, "en-GB")
     }
 
     func testAPublishedPluralWinsOverTheBundledOne() async throws {

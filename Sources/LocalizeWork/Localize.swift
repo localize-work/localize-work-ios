@@ -48,6 +48,9 @@ public final class Localize: Sendable {
             let previous = sharedInstance.withLock { $0 }
             previous?.retired.withLock { $0 = true }
             let instance = Localize(configuration: configuration, continuing: previous)
+            // A view listens to `Localize.shared.updates` once, for as long
+            // as it is on screen. Its stream goes on with the new instance.
+            instance.takeOverStreams(of: previous ?? unconfigured)
             sharedInstance.withLock { $0 = instance }
             return instance
         }
@@ -107,7 +110,8 @@ public final class Localize: Sendable {
         /// then means the run started with none and shows bundled strings.
         var held: Release?
         var refresh: Task<LocalizeRefreshResult, Error>?
-        var observers: [UUID: AsyncStream<String>.Continuation] = [:]
+        /// The streams that hear of this instance's releases.
+        var streams = UpdateStreams()
     }
 
     /// Creates an instance and loads the release saved on the device, if
@@ -134,17 +138,26 @@ public final class Localize: Sendable {
             configuration.version == nil || release.version == configuration.version
         }
         let saved = store?.load().flatMap { matchesPin($0) ? $0 : nil }
-        // With the next-launch policy the release a run of the app shows is
-        // decided when the app starts. An instance that takes over from
-        // another one for the same project (a change of language) is still
-        // the same run, so it reads what that one started with, not what was
-        // saved meanwhile. That holds for a run that started with nothing,
-        // too: it keeps showing bundled strings.
+        // An instance that takes over from another one for the same project
+        // (a change of language) is still the same run of the app, and goes
+        // on from the release that one held.
         var started = saved
-        if configuration.updatePolicy == .nextLaunch,
-           let previous, let store, let theirs = previous.store,
+        if let previous, let store, let theirs = previous.store,
            theirs.directory == store.directory, theirs.source == store.source {
-            started = previous.state.withLock({ $0.held }).flatMap { matchesPin($0) ? $0 : nil }
+            let held = previous.state.withLock({ $0.held }).flatMap { matchesPin($0) ? $0 : nil }
+            switch configuration.updatePolicy {
+            case .nextLaunch:
+                // The release a run shows is decided when the app starts, so
+                // it is what that instance started with, not what was saved
+                // meanwhile. That holds for a run that started with nothing,
+                // too: it keeps showing bundled strings.
+                started = held
+            case .immediately:
+                // The newest release is read as soon as it is here, and the
+                // saved one is that. When a release could not be saved it is
+                // in use from memory only, and is not dropped for that.
+                started = saved ?? held
+            }
         }
         // A release is used whole or not at all. After a change of language
         // the saved one lacks the new language's files: until they arrive the
@@ -158,10 +171,15 @@ public final class Localize: Sendable {
         localeChain.flatMap { locale in namespaces.map { FileKey(locale: locale, namespace: $0) } }
     }
 
-    deinit {
-        // End the streams, or a consumer would wait on them forever.
-        let observers = state.withLock { Array($0.observers.values) }
-        for observer in observers { observer.finish() }
+    /// Takes the streams `other` has handed out, which from now on hear of
+    /// this instance's releases. `other` is left with none.
+    private func takeOverStreams(of other: Localize) {
+        let theirs = other.state.withLock { state -> UpdateStreams in
+            let streams = state.streams
+            state.streams = UpdateStreams()
+            return streams
+        }
+        state.withLock { $0.streams = theirs }
     }
 
     /// The release version in use, such as `"v12"`. Nil until a release has
@@ -271,7 +289,11 @@ public final class Localize: Sendable {
         let completedHeld = await completeHeldRelease(needed, loader)
 
         // The pointer is read once. Every file below comes from the version
-        // it named, whatever is published in the meantime.
+        // it named, whatever is published in the meantime. A version the
+        // pointer (or the pin) names is there, so a file it does not have is
+        // an empty file, and the strings of that locale come from the next
+        // one in the chain. `completed` cannot take that for granted of the
+        // release it is given.
         let version: String
         if let pinned = configuration.version {
             version = pinned
@@ -345,12 +367,20 @@ public final class Localize: Sendable {
     private func save(_ release: Release) throws {
         // An instance that `configure` has replaced must not write its
         // release over the one its replacement saves.
-        try Self.commitLock.withLock { _ in
+        let written = try Self.commitLock.withLock { _ -> Release in
             if retired.withLock({ $0 }) { throw LocalizeError.replaced }
             guard let store else { throw CocoaError(.fileNoSuchFile) }
-            try store.save(release)
+            // Another instance of the project, one in another language say,
+            // may have saved files of this version since this one read the
+            // device. Files of a version never change, so they are kept.
+            var whole = release
+            if let there = store.load(), there.version == release.version {
+                whole = release.adding(there.files)
+            }
+            try store.save(whole)
+            return whole
         }
-        state.withLock { $0.saved = release }
+        state.withLock { $0.saved = written }
     }
 
     /// Makes the release this run reads whole for the current language, from
@@ -403,15 +433,15 @@ public final class Localize: Sendable {
     /// Makes `release` the one lookups read and announces it. False when it
     /// is what they read already.
     private func use(_ release: Release) async -> Bool {
-        let observers = state.withLock { state -> [AsyncStream<String>.Continuation]? in
+        let streams = state.withLock { state -> UpdateStreams? in
             if let active = state.active, active.hasSameContents(as: release) { return nil }
             state.active = release
             state.held = release
-            return Array(state.observers.values)
+            return state.streams
         }
-        guard let observers else { return false }
-        for observer in observers { observer.yield(release.version) }
+        guard let streams else { return false }
         let version = release.version
+        streams.announce(version)
         await MainActor.run {
             NotificationCenter.default.post(
                 name: Self.didUpdateNotification,
@@ -453,13 +483,39 @@ public final class Localize: Sendable {
     ///     // re-read the strings on screen
     /// }
     /// ```
+    ///
+    /// A stream of ``shared`` goes on when ``configure(_:refresh:)`` is
+    /// called again: it then tells of the new instance's releases.
     public var updates: AsyncStream<String> {
+        state.withLock { $0.streams }.makeStream()
+    }
+}
+
+/// The streams ``Localize/updates`` has handed out. They are an object of
+/// their own so that `configure` can pass those of the instance it replaces
+/// on to the new one.
+final class UpdateStreams: Sendable {
+    private let continuations = Locked<[UUID: AsyncStream<String>.Continuation]>([:])
+
+    func makeStream() -> AsyncStream<String> {
         let id = UUID()
         let (stream, continuation) = AsyncStream<String>.makeStream(bufferingPolicy: .bufferingNewest(1))
         continuation.onTermination = { [weak self] _ in
-            self?.state.withLock { $0.observers[id] = nil }
+            self?.continuations.withLock { $0[id] = nil }
         }
-        state.withLock { $0.observers[id] = continuation }
+        continuations.withLock { $0[id] = continuation }
         return stream
+    }
+
+    func announce(_ version: String) {
+        let all = continuations.withLock { Array($0.values) }
+        for continuation in all { continuation.yield(version) }
+    }
+
+    deinit {
+        // No instance is left to tell of a release. End the streams, or a
+        // consumer would wait on them forever.
+        let all = continuations.withLock { Array($0.values) }
+        for continuation in all { continuation.finish() }
     }
 }

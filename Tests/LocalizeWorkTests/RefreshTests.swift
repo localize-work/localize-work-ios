@@ -604,6 +604,86 @@ final class RefreshTests: LocalizeTestCase {
         XCTAssertEqual(english.string("a"), "A")
     }
 
+    /// A release that has no file at all for the new language. Asked for
+    /// directly, its "not found" answers could also mean the release is gone
+    /// from the CDN, so the app's bundled strings stay. Once the pointer has
+    /// named that version it is known to be there: the missing files are
+    /// empty ones, and the strings come from the fallback language, as they
+    /// would after a fresh launch in that language.
+    func testAReleaseWithoutTheNewLanguageIsReadOnceThePointerNamesIt() async throws {
+        for policy in [LocalizeUpdatePolicy.immediately, .nextLaunch] {
+            stub = StubTransport()
+            try? FileManager.default.removeItem(at: cacheDirectory)
+            _ = try await loaded(["en/translation": ["a": "A"]])
+            stub.respond(stub.pointerPath, status: 503)
+            let french = Localize(configuration: configuration(locale: "fr", fallback: "en", policy: policy))
+            do {
+                try await french.refresh()
+                XCTFail("expected the refresh to fail without the pointer")
+            } catch {}
+            XCTAssertNil(french.version, "\(policy)")
+            XCTAssertEqual(french.string("a", fallback: "A (groupé)"), "A (groupé)", "\(policy)")
+
+            stub.setPointer("v1")
+            let result = try await french.refresh()
+            XCTAssertEqual(result, .updated(version: "v1"), "\(policy)")
+            XCTAssertEqual(french.string("a", fallback: "A (groupé)"), "A", "\(policy)")
+            // A launch in French reads the same.
+            stub.goOffline()
+            let next = Localize(configuration: configuration(locale: "fr", fallback: "en", policy: policy))
+            XCTAssertEqual(next.string("a", fallback: "A (groupé)"), "A", "\(policy)")
+        }
+    }
+
+    /// Two instances of one project, in two languages, that both started
+    /// before anything was saved: each adds its files to what is saved, so
+    /// neither loses its language to the other.
+    func testTwoInstancesOfOneProjectKeepEachOthersSavedFiles() async throws {
+        stub.setPointer("v1")
+        stub.publish("v1", ["en/translation": ["a": "A"], "de/translation": ["a": "A auf Deutsch"]])
+        let english = Localize(configuration: configuration(locale: "en"))
+        let german = Localize(configuration: configuration(locale: "de"))
+        try await english.refresh()
+        try await german.refresh()
+
+        stub.goOffline()
+        XCTAssertEqual(Localize(configuration: configuration(locale: "en")).string("a"), "A")
+        XCTAssertEqual(Localize(configuration: configuration(locale: "de")).string("a"), "A auf Deutsch")
+        // Nothing is fetched twice for it, and nothing is saved again.
+        XCTAssertEqual(stub.requestCount("/demo/v1/en/translation.json"), 1)
+        XCTAssertEqual(stub.requestCount("/demo/v1/de/translation.json"), 1)
+    }
+
+    /// The release could not be saved, so it is in use from memory only.
+    /// `configure` called again for another language is still the same run:
+    /// the new instance goes on from that release and needs only the new
+    /// language's files, not the pointer.
+    func testAReleaseThatCouldNotBeSavedIsKeptWhenConfigureIsCalledAgain() async throws {
+        addTeardownBlock { Localize.resetShared() }
+        stub.setPointer("v1")
+        stub.publish("v1", ["en/translation": ["a": "A"], "de/translation": ["a": "A auf Deutsch"]])
+        // A file where the cache folder should be.
+        try Data().write(to: cacheDirectory)
+        let english = Localize.configure(configuration(locale: "en"), refresh: false)
+        try await english.refresh()
+        XCTAssertEqual(english.string("a"), "A")
+        XCTAssertEqual(savedFiles, [])
+
+        stub.respond(stub.pointerPath, status: 503)
+        let german = Localize.configure(configuration(locale: "de", fallback: "en"), refresh: false)
+        XCTAssertNil(german.version)
+        await assertThrows(.http(status: 503, url: URL(string: StubTransport.base + stub.pointerPath)!)) {
+            try await german.refresh()
+        }
+        XCTAssertEqual(german.version, "v1")
+        XCTAssertEqual(german.string("a"), "A auf Deutsch")
+        XCTAssertEqual(stub.requestCount("/demo/v1/en/translation.json"), 1)
+
+        // The same language again: nothing is missing, so it is read at once.
+        let again = Localize.configure(configuration(locale: "de", fallback: "en"), refresh: false)
+        XCTAssertEqual(again.string("a"), "A auf Deutsch")
+    }
+
     func testAPinnedVersionThatIsNotPublishedYetIsNotSavedAsEmpty() async throws {
         let localize = Localize(configuration: configuration(fallback: nil, version: "v3"))
         let url = URL(string: "\(StubTransport.base)/demo/v3/en/translation.json")!
@@ -1037,6 +1117,38 @@ final class RefreshTests: LocalizeTestCase {
             let result = try await shared.refresh()
             XCTAssertNotNil(result)
         }
+    }
+
+    /// A view listens to `Localize.shared.updates` once. `configure` called
+    /// again, as for a change of language, hands the stream to the new
+    /// instance, so the view keeps hearing of releases.
+    func testTheSharedInstancesStreamGoesOnAfterConfigureIsCalledAgain() async throws {
+        addTeardownBlock { Localize.resetShared() }
+        stub.setPointer("v1")
+        stub.publish("v1", ["en/translation": ["a": "A"], "de/translation": ["a": "A auf Deutsch"]])
+        // Asked for before the SDK is set up, as a view that appears early does.
+        let early = Localize.shared.updates
+        let english = Localize.configure(configuration(locale: "en"), refresh: false)
+        let updates = Localize.shared.updates
+
+        let german = Localize.configure(configuration(locale: "de"), refresh: false)
+        let ofTheFirst = english.updates
+        try await german.refresh()
+
+        let heard = await nextValue(of: updates)
+        XCTAssertEqual(heard, "v1")
+        let heardEarly = await nextValue(of: early)
+        XCTAssertEqual(heardEarly, "v1")
+        // The instance that was replaced announces nothing on them.
+        try? await english.refresh()
+        stub.setPointer("v2")
+        stub.publish("v2", ["en/translation": ["a": "A2"], "de/translation": ["a": "A2 auf Deutsch"]])
+        try await german.refresh()
+        let next = await nextValue(of: updates)
+        XCTAssertEqual(next, "v2")
+        // A stream asked of the replaced instance afterwards hears nothing.
+        let nothing = await nextValue(of: ofTheFirst, timeout: 0.2)
+        XCTAssertNil(nothing)
     }
 
     func testTheSharedInstance() async throws {
