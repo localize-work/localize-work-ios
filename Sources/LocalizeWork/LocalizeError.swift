@@ -21,6 +21,9 @@ public enum LocalizeError: Error, Sendable, Equatable {
     case invalidFile(url: URL)
     /// The downloaded release could not be written to the device.
     case cacheWriteFailed(String)
+    /// A later ``Localize/configure(_:refresh:)`` call replaced this
+    /// instance while it was downloading. Its download is dropped.
+    case replaced
 
     /// Whether trying again later can succeed without changing anything.
     /// True for server errors and network failures; false for everything that
@@ -29,7 +32,8 @@ public enum LocalizeError: Error, Sendable, Equatable {
         switch self {
         case .http(let status, _): return status >= 500
         case .network, .cacheWriteFailed: return true
-        case .notConfigured, .invalidConfiguration, .projectNotPublished, .invalidPointer, .invalidFile: return false
+        case .notConfigured, .invalidConfiguration, .projectNotPublished, .invalidPointer, .invalidFile, .replaced:
+            return false
         }
     }
 }
@@ -53,6 +57,8 @@ extension LocalizeError: LocalizedError {
             return "\(url.absoluteString) is not a JSON object."
         case .cacheWriteFailed(let reason):
             return "The downloaded release could not be saved: \(reason)"
+        case .replaced:
+            return "This instance was replaced by a later Localize.configure(_:) call."
         }
     }
 }

@@ -84,15 +84,17 @@ final class KeyLookupTests: XCTestCase {
     }
 
     func testPluralCandidates() {
+        // As i18next: the zero form for 0, the count's own form, the plain
+        // key. No other form of the same file stands in for a missing one.
         XCTAssertEqual(KeyLookup.candidates(key: "items", count: nil, locale: "en"), ["items"])
-        XCTAssertEqual(KeyLookup.candidates(key: "items", count: 1, locale: "en"), ["items_one", "items_other", "items"])
+        XCTAssertEqual(KeyLookup.candidates(key: "items", count: 1, locale: "en"), ["items_one", "items"])
         XCTAssertEqual(KeyLookup.candidates(key: "items", count: 5, locale: "en"), ["items_other", "items"])
         XCTAssertEqual(KeyLookup.candidates(key: "items", count: 0, locale: "en"), ["items_zero", "items_other", "items"])
-        XCTAssertEqual(KeyLookup.candidates(key: "a.items", count: 3, locale: "ru"), ["a.items_few", "a.items_other", "a.items"])
-        XCTAssertEqual(KeyLookup.candidates(key: "items", count: 0, locale: "ru"), ["items_zero", "items_many", "items_other", "items"])
+        XCTAssertEqual(KeyLookup.candidates(key: "a.items", count: 3, locale: "ru"), ["a.items_few", "a.items"])
+        XCTAssertEqual(KeyLookup.candidates(key: "items", count: 0, locale: "ru"), ["items_zero", "items_many", "items"])
         // Latvian and Arabic name 0 "zero" themselves.
-        XCTAssertEqual(KeyLookup.candidates(key: "items", count: 0, locale: "lv"), ["items_zero", "items_other", "items"])
-        XCTAssertEqual(KeyLookup.candidates(key: "items", count: 0, locale: "ar"), ["items_zero", "items_other", "items"])
+        XCTAssertEqual(KeyLookup.candidates(key: "items", count: 0, locale: "lv"), ["items_zero", "items"])
+        XCTAssertEqual(KeyLookup.candidates(key: "items", count: 0, locale: "ar"), ["items_zero", "items"])
     }
 }
 
@@ -104,8 +106,9 @@ final class LocaleCodeTests: XCTestCase {
         XCTAssertEqual(LocaleCode.chain(locale: "en", fallback: nil), ["en"])
         XCTAssertEqual(LocaleCode.chain(locale: "en", fallback: "en"), ["en"])
         XCTAssertEqual(LocaleCode.chain(locale: "zh-Hans-CN", fallback: "en"), ["zh-Hans-CN", "zh-Hans", "zh", "en"])
-        // The fallback locale is used as written, without its shorter forms.
-        XCTAssertEqual(LocaleCode.chain(locale: "et", fallback: "pt-BR"), ["et", "pt-BR"])
+        // The fallback locale brings its shorter forms too.
+        XCTAssertEqual(LocaleCode.chain(locale: "et", fallback: "pt-BR"), ["et", "pt-BR", "pt"])
+        XCTAssertEqual(LocaleCode.chain(locale: "en-FI", fallback: "en-GB"), ["en-FI", "en", "en-GB"])
         XCTAssertEqual(LocaleCode.chain(locale: "", fallback: nil), [])
     }
 
@@ -116,6 +119,15 @@ final class LocaleCodeTests: XCTestCase {
         XCTAssertEqual(LocaleCode.canonical("es-419"), "es-419")
         XCTAssertEqual(LocaleCode.canonical(" et "), "et")
         XCTAssertEqual(LocaleCode.canonical(""), "")
+        // Codes older systems still report are written as the project writes them.
+        XCTAssertEqual(LocaleCode.canonical("iw-IL"), "he-IL")
+        XCTAssertEqual(LocaleCode.canonical("in"), "id")
+        XCTAssertEqual(LocaleCode.canonical("ji"), "yi")
+        // What a device adds after the region is not part of a published locale.
+        XCTAssertEqual(LocaleCode.canonical("en-FI-u-ca-gregory"), "en-FI")
+        XCTAssertEqual(LocaleCode.canonical("de-CH-1996"), "de-CH-1996")
+        // Anything else is taken as written.
+        XCTAssertEqual(LocaleCode.canonical("no"), "no")
     }
 
     func testConfigurationNormalisesItsLocales() {

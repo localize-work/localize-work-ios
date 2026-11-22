@@ -176,7 +176,7 @@ final class LookupTests: LocalizeTestCase {
         XCTAssertEqual(localize.string("nested.docs", count: 3), "docs")
         // No plural forms: the plain key answers.
         XCTAssertEqual(localize.string("plain", count: 3), "3 things")
-        // The form of the count is missing: `_other` answers.
+        // No locale has the form of the count: the general form is the last resort.
         XCTAssertEqual(localize.string("onlyOther", count: 1), "1 of them")
         // Without a count a plural key has no text of its own.
         XCTAssertEqual(localize.string("items"), "items")
@@ -236,6 +236,37 @@ final class LookupTests: LocalizeTestCase {
         XCTAssertEqual(localize.string("items", count: 4), "4 items")
         // As in i18next, every form is tried in a locale before the next one.
         XCTAssertEqual(localize.string("mixed", count: 4), "plain in en-FI")
+    }
+
+    /// A regional variant that overrides only the general form inherits the
+    /// form for 1 from the base language, as in i18next.
+    func testAVariantThatOverridesOnlyTheOtherFormInheritsTheRest() async throws {
+        let localize = try await loaded(
+            [
+                "en-FI/translation": ["items_other": "{{count}} things (FI)"],
+                "en/translation": ["items_one": "{{count}} item", "items_other": "{{count}} items"],
+            ],
+            locale: "en-FI"
+        )
+        XCTAssertEqual(localize.string("items", count: 1), "1 item")
+        XCTAssertEqual(localize.string("items", count: 2), "2 things (FI)")
+    }
+
+    /// The same holds across languages: a form the first language lacks is
+    /// taken from the fallback language before any other form stands in.
+    func testAMissingFormFallsToTheNextLanguageBeforeTheOtherForm() async throws {
+        let localize = try await loaded(
+            [
+                "de/translation": ["items_other": "{{count}} Artikel", "solo_other": "{{count}} allein"],
+                "en/translation": ["items_one": "{{count}} item", "items_other": "{{count}} items"],
+            ],
+            locale: "de",
+            fallback: "en"
+        )
+        XCTAssertEqual(localize.string("items", count: 1), "1 item")
+        XCTAssertEqual(localize.string("items", count: 3), "3 Artikel")
+        // English has nothing for this key, so German's general form is the last resort.
+        XCTAssertEqual(localize.string("solo", count: 1), "1 allein")
     }
 
     func testInterpolation() async throws {

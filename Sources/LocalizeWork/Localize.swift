@@ -38,6 +38,12 @@ public final class Localize: Sendable {
     /// release is then downloaded in the background.
     @discardableResult
     public static func configure(_ configuration: LocalizeConfiguration, refresh: Bool = true) -> Localize {
+        // The instance being replaced may still be downloading. From here on
+        // it saves nothing, so it cannot write its release over the new
+        // instance's, and the new instance reads the device after that point.
+        commitLock.withLock { _ in
+            sharedInstance.withLock { $0 }?.retired.withLock { $0 = true }
+        }
         let instance = Localize(configuration: configuration)
         sharedInstance.withLock { $0 = instance }
         if refresh {
@@ -52,7 +58,20 @@ public final class Localize: Sendable {
         return instance
     }
 
+    /// Puts ``shared`` back to its state before `configure`. For tests.
+    static func resetShared() {
+        commitLock.withLock { _ in
+            sharedInstance.withLock { shared in
+                shared?.retired.withLock { $0 = true }
+                shared = nil
+            }
+        }
+    }
+
     private static let sharedInstance = Locked<Localize?>(nil)
+    /// Held while a release is saved, and while an instance is retired, so
+    /// an instance that was replaced never saves after its replacement began.
+    private static let commitLock = Locked<Void>(())
     private static let unconfigured = Localize(configuration: LocalizeConfiguration(projectSlug: ""))
     private static let log = Logger(subsystem: "work.localize.sdk", category: "LocalizeWork")
 
@@ -65,12 +84,20 @@ public final class Localize: Sendable {
     private let store: ReleaseStore?
     private let state: Locked<State>
 
+    /// Set when a later `configure` call replaced this instance.
+    private let retired = Locked(false)
+
     private struct State {
-        /// The release lookups read.
+        /// The release lookups read. It always holds every file the locale
+        /// chain and the namespaces need.
         var active: Release?
         /// The release saved on the device. With the next-launch policy it
-        /// can be newer than `active`.
+        /// can be newer than `active`; after a change of language it can
+        /// lack files, and is then not in use until they are downloaded.
         var saved: Release?
+        /// The version of the release this launch found on the device but
+        /// could not use, because it lacked files for the current language.
+        var incompleteAtStart: String?
         var refresh: Task<LocalizeRefreshResult, Error>?
         var observers: [UUID: AsyncStream<String>.Continuation] = [:]
     }
@@ -87,8 +114,25 @@ public final class Localize: Sendable {
                 ReleaseStore(root: $0, projectSlug: configuration.projectSlug, cdnBaseURL: configuration.cdnBaseURL)
             }
         }
-        let saved = store?.load()
-        state = Locked(State(active: saved, saved: saved))
+        // A saved release of another version than the pinned one is not the
+        // release this configuration asks for.
+        let saved = store?.load().flatMap { release in
+            configuration.version == nil || release.version == configuration.version ? release : nil
+        }
+        // A release is used whole or not at all. After a change of language
+        // the saved one lacks the new language's files: until they arrive the
+        // app's bundled strings, which are in that language, are the better text.
+        let needed = Self.neededFiles(localeChain, configuration.namespaces)
+        let active = saved.flatMap { $0.holds(needed) ? $0 : nil }
+        state = Locked(State(
+            active: active,
+            saved: saved,
+            incompleteAtStart: active == nil ? saved?.version : nil
+        ))
+    }
+
+    private static func neededFiles(_ localeChain: [String], _ namespaces: [String]) -> [FileKey] {
+        localeChain.flatMap { locale in namespaces.map { FileKey(locale: locale, namespace: $0) } }
     }
 
     deinit {
@@ -140,6 +184,17 @@ public final class Localize: Sendable {
                     }
                 }
             }
+            // No locale has the form the count asks for, nor the plain key.
+            // Before giving up on the release, take a language's general form.
+            if count != nil {
+                let other = "\(key)_\(PluralCategory.other.rawValue)"
+                for locale in localeChain {
+                    guard let file = release.files[FileKey(locale: locale, namespace: namespace)] else { continue }
+                    if let text = KeyLookup.string(in: file, key: other) {
+                        return Interpolation.apply(text, resolve: resolve)
+                    }
+                }
+            }
         }
         if let bundled = BundledStrings.string(
             key: key,
@@ -178,6 +233,7 @@ public final class Localize: Sendable {
 
     private func performRefresh() async throws -> LocalizeRefreshResult {
         try validateConfiguration()
+        if retired.withLock({ $0 }) { throw LocalizeError.replaced }
         let loader = ReleaseLoader(
             projectSlug: configuration.projectSlug,
             cdnBaseURL: configuration.cdnBaseURL,
@@ -193,12 +249,10 @@ public final class Localize: Sendable {
             version = try await loader.latestVersion()
         }
 
-        let needed = localeChain.flatMap { locale in
-            configuration.namespaces.map { FileKey(locale: locale, namespace: $0) }
-        }
+        let needed = Self.neededFiles(localeChain, configuration.namespaces)
         // Files of a version never change, so the ones already here for this
         // version are reused and only the rest are downloaded.
-        let (active, saved) = state.withLock { ($0.active, $0.saved) }
+        let (active, saved, incompleteAtStart) = state.withLock { ($0.active, $0.saved, $0.incompleteAtStart) }
         var files: [FileKey: [String: Node]] = [:]
         for known in [saved, active] {
             guard let known, known.version == version else { continue }
@@ -206,23 +260,39 @@ public final class Localize: Sendable {
                 files[file] = known.files[file]
             }
         }
+        let heldNothing = files.isEmpty
         let missing = Set(needed).subtracting(files.keys)
-        try await withThrowingTaskGroup(of: (FileKey, [String: Node]).self) { group in
+        var found = false
+        try await withThrowingTaskGroup(of: (FileKey, [String: Node]?).self) { group in
             for file in missing {
                 group.addTask { (file, try await loader.file(version: version, file: file)) }
             }
             for try await (file, contents) in group {
-                files[file] = contents
+                if contents != nil { found = true }
+                // A file the version does not have is an empty file.
+                files[file] = contents ?? [:]
             }
+        }
+        if configuration.version != nil, heldNothing, !found, let first = needed.first {
+            // Most likely the pinned release is not published yet. Saving it
+            // as empty would hide it for good once it does exist.
+            throw LocalizeError.http(status: 404, url: try loader.fileURL(version: version, file: first))
         }
         // Reached only with every file in hand.
         let release = Release(version: version, files: files)
 
         if saved.map({ $0.hasSameContents(as: release) }) != true {
             do {
-                guard let store else { throw CocoaError(.fileNoSuchFile) }
-                try store.save(release)
+                // An instance that `configure` has replaced must not write
+                // its release over the one its replacement saves.
+                try Self.commitLock.withLock { _ in
+                    if retired.withLock({ $0 }) { throw LocalizeError.replaced }
+                    guard let store else { throw CocoaError(.fileNoSuchFile) }
+                    try store.save(release)
+                }
                 state.withLock { $0.saved = release }
+            } catch LocalizeError.replaced {
+                throw LocalizeError.replaced
             } catch {
                 // With the next-launch policy a release that is not saved
                 // never takes effect, so that is a failure. Otherwise the
@@ -236,25 +306,39 @@ public final class Localize: Sendable {
 
         switch configuration.updatePolicy {
         case .immediately:
-            let observers = state.withLock { state -> [AsyncStream<String>.Continuation]? in
-                if let active = state.active, active.hasSameContents(as: release) { return nil }
-                state.active = release
-                return Array(state.observers.values)
-            }
-            guard let observers else { return .upToDate(version: version) }
-            for observer in observers { observer.yield(version) }
-            await MainActor.run {
-                NotificationCenter.default.post(
-                    name: Self.didUpdateNotification,
-                    object: self,
-                    userInfo: [Self.versionUserInfoKey: version]
-                )
-            }
-            return .updated(version: version)
+            return await use(release) ? .updated(version: version) : .upToDate(version: version)
         case .nextLaunch:
             if let active, active.hasSameContents(as: release) { return .upToDate(version: version) }
+            // The release this launch found on the device was not in use
+            // only because it lacked files for the current language. With
+            // them it is the release the launch started from, so it is used
+            // now: nothing the app has shown from a release changes.
+            if active == nil, incompleteAtStart == version {
+                return await use(release) ? .updated(version: version) : .upToDate(version: version)
+            }
             return .pendingNextLaunch(version: version)
         }
+    }
+
+    /// Makes `release` the one lookups read and announces it. False when it
+    /// is what they read already.
+    private func use(_ release: Release) async -> Bool {
+        let observers = state.withLock { state -> [AsyncStream<String>.Continuation]? in
+            if let active = state.active, active.hasSameContents(as: release) { return nil }
+            state.active = release
+            return Array(state.observers.values)
+        }
+        guard let observers else { return false }
+        for observer in observers { observer.yield(release.version) }
+        let version = release.version
+        await MainActor.run {
+            NotificationCenter.default.post(
+                name: Self.didUpdateNotification,
+                object: self,
+                userInfo: [Self.versionUserInfoKey: version]
+            )
+        }
+        return true
     }
 
     private func validateConfiguration() throws {

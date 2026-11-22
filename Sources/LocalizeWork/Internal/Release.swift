@@ -40,6 +40,11 @@ struct Release: Sendable {
     /// A file the release does not have (404) is present here as empty.
     let files: [FileKey: [String: Node]]
 
+    /// Whether every one of `needed` is here.
+    func holds(_ needed: [FileKey]) -> Bool {
+        needed.allSatisfy { files[$0] != nil }
+    }
+
     /// Same version and same set of files. Files of a version never change,
     /// so this is enough to tell that nothing new would be shown.
     func hasSameContents(as other: Release) -> Bool {

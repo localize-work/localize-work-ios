@@ -25,16 +25,17 @@ enum KeyLookup {
         return nil
     }
 
-    /// The names to try for `key` with a count, most specific first:
-    /// `key_zero` for 0, the count's plural category in the language of
-    /// `locale`, `key_other`, then the plain key.
+    /// The names to try for `key` with a count in one locale's file, as
+    /// i18next does: `key_zero` for 0, the count's plural category in the
+    /// language of `locale`, then the plain key. A file that lacks them
+    /// leaves the key to the next locale: a regional variant that overrides
+    /// only the `other` form inherits its `one` form from the base language.
     static func candidates(key: String, count: Int?, locale: String) -> [String] {
         guard let count else { return [key] }
         let category = PluralRules.category(for: count, locale: locale)
         var names: [String] = []
         if count == 0 && category != .zero { names.append("\(key)_\(PluralCategory.zero.rawValue)") }
         names.append("\(key)_\(category.rawValue)")
-        if category != .other { names.append("\(key)_\(PluralCategory.other.rawValue)") }
         names.append(key)
         return names
     }

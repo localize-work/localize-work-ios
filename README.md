@@ -112,11 +112,11 @@ LocalizeConfiguration(
 | Option | Default | Meaning |
 |---|---|---|
 | `projectSlug` | required | Your project's slug. |
-| `locale` | the device's first preferred language | The language to show, as a BCP 47 code: `en`, `et`, `en-FI`. |
+| `locale` | the device's first preferred language | The language to show, as a BCP 47 code: `en`, `et`, `en-FI`. Spell it the way your project does (see below). |
 | `fallbackLocale` | none | Where a string is looked up when `locale` does not have it. Set it to your project's source language. |
 | `namespaces` | `["translation"]` | The namespaces to download. |
 | `defaultNamespace` | the first of `namespaces` | The namespace of a lookup that names none. |
-| `version` | none (follow the latest) | A release to stay on, such as `"v12"`. The SDK then never reads `latest.json`. |
+| `version` | none (follow the latest) | A release to stay on, such as `"v12"`. The SDK then never reads `latest.json`, and never uses a saved release of another version. |
 | `updatePolicy` | `.immediately` | When a downloaded release starts being used: `.immediately`, or `.nextLaunch`. |
 | `cdnBaseURL` | `https://cdn.localize.work` | Where the files are served from. |
 | `requestTimeout` | 15 seconds | How long a request may wait for data. |
@@ -127,9 +127,16 @@ LocalizeConfiguration(
 ### Which languages are downloaded
 
 A string is looked up in the locale, then in each shorter form of it, then in
-the fallback locale. For `locale: "en-FI"` and `fallbackLocale: "et"` that is
-`en-FI`, `en`, `et`. Every namespace is downloaded for each of them.
-`configuration.localeChain` shows the list.
+the fallback locale and its shorter forms. For `locale: "en-FI"` and
+`fallbackLocale: "et"` that is `en-FI`, `en`, `et`. Every namespace is
+downloaded for each of them. `configuration.localeChain` shows the list.
+
+A locale is requested from the CDN as it is written, with only its letter case
+corrected (`en_fi` becomes `en-FI`), anything after the region that a device
+adds dropped, and the three codes older systems still report replaced (`iw`,
+`in`, `ji` become `he`, `id`, `yi`). So spell `locale` and `fallbackLocale`
+the way your project's languages are spelled: a project with `sr-Latn-RS` does
+not answer to `sh-RS`.
 
 A regional locale such as `en-FI` usually holds only the few strings that
 differ from `en`, and often has no file at all for a namespace. That is normal:
@@ -137,14 +144,24 @@ a file the release does not have counts as empty, and the strings come from
 `en`.
 
 To change the language while the app runs, call `Localize.configure` again with
-the new `locale`.
+the new `locale`. The instance it replaces stops: a download it still has
+under way is dropped (its `refresh()` throws `replaced`), so it cannot save
+over the new one.
+
+A release is used whole or not at all. When the language has changed since the
+release on the device was saved, that release has no files for the new
+language, so the app shows its bundled strings until the files have been
+downloaded.
 
 ### Applying updates
 
 With `.immediately` a release is used as soon as it is downloaded, so text can
 change while the app is open. With `.nextLaunch` the download is saved and used
 from the next launch, and nothing changes under a running app. On the very
-first launch that means bundled strings until the second launch.
+first launch that means bundled strings until the second launch. The one
+exception is a change of language: files that the release on the device lacks
+for the new language are added to it as soon as they are downloaded, since no
+text the app already shows from that release changes.
 
 ## Looking up strings
 
@@ -183,13 +200,17 @@ a suffix:
 { "items_one": "{{count}} item", "items_other": "{{count}} items" }
 ```
 
-For a count the SDK tries, in this order:
+For a count the SDK tries, in each locale's file in turn, as i18next does:
 
 1. `items_zero`, when the count is 0;
 2. `items_<form>`, the form the language uses for that count
    (`one`, `two`, `few`, `many`, `other`);
-3. `items_other`;
-4. `items`.
+3. `items`.
+
+A file that has none of them leaves the key to the next locale. So a regional
+locale that overrides only `items_other` still gets `items_one` from its base
+language. Only when no locale has the form or the plain key is a locale's
+`items_other` used, as a last resort.
 
 The form is chosen by the language of the file being read. If the Russian file
 lacks a key and the English one answers, the English rule picks the form.
@@ -296,6 +317,12 @@ version. A refresh that finds nothing new costs one small request.
 - The last complete release is saved on the device, per project. It is loaded
   when the SDK is configured, before `configure` returns, so strings are there
   at once with no network.
+- A saved release is used only when it is the one the configuration asks for:
+  it has every file the current language needs, and with a pinned `version` it
+  is that version. Otherwise the app shows bundled strings until a refresh
+  succeeds.
+- A pinned `version` that is not published yet makes `refresh()` fail (HTTP
+  404) and saves nothing, so the release is picked up once it exists.
 - When a newer release is saved, older ones are deleted.
 - A saved release that cannot be read (a damaged or half-written file) is
   deleted and treated as absent. The app shows bundled strings until the next
@@ -318,13 +345,17 @@ version. A refresh that finds nothing new costs one small request.
 | `invalidFile` | A file is not the JSON it should be. | no |
 | `cacheWriteFailed` | The release could not be saved (only with `.nextLaunch`). | yes |
 | `notConfigured` | `Localize.shared` was used before `Localize.configure`. | no |
+| `replaced` | A later `Localize.configure` call replaced this instance while it was downloading. | no |
 
 `error.isRetryable` gives the last column. The SDK does not retry by itself:
 call `refresh()` again when it suits your app.
 
 ## Plural coverage
 
-The plural rules are those of Unicode CLDR 47, for whole numbers. The tests
+The plural rules are those of Unicode CLDR 47, for whole numbers. That is the
+release localize.work itself uses to decide which plural forms a language has,
+and the Android SDK uses the same one, so all three agree on the form a count
+takes. The tests
 check every language below against ICU.
 
 | Forms | Languages |

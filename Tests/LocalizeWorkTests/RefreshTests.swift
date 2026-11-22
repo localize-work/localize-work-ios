@@ -483,9 +483,13 @@ final class RefreshTests: LocalizeTestCase {
         _ = try await loaded(["en/translation": ["a": "A", "b": "B"], "de/translation": ["a": "A auf Deutsch"]])
         let before = stub.requests.count
 
-        // The device language is now German; English is the fallback.
+        // The device language is now German; English is the fallback. The
+        // saved release has no German file, so it is not in use yet: the
+        // app's bundled strings (none in this test) are in German, the saved
+        // English text is not.
         let german = Localize(configuration: configuration(locale: "de", fallback: "en"))
-        XCTAssertEqual(german.string("a"), "A", "the saved English file serves as the fallback")
+        XCTAssertNil(german.version)
+        XCTAssertEqual(german.string("a"), "a")
         let result = try await german.refresh()
 
         XCTAssertEqual(result, .updated(version: "v1"))
@@ -494,7 +498,101 @@ final class RefreshTests: LocalizeTestCase {
         XCTAssertEqual(german.string("b"), "B")
     }
 
+    func testASavedReleaseWithoutTheNewLanguageStaysUnusedWhenTheDownloadFails() async throws {
+        _ = try await loaded(["en/translation": ["a": "A"]])
+        stub.goOffline()
+        let german = Localize(configuration: configuration(locale: "de", fallback: "en"))
+        do {
+            try await german.refresh()
+            XCTFail("expected the refresh to fail offline")
+        } catch {}
+        XCTAssertNil(german.version)
+        XCTAssertEqual(german.string("a", fallback: "A (gebündelt)"), "A (gebündelt)")
+        // The English release is still there for an English launch.
+        let english = Localize(configuration: configuration(locale: "en"))
+        XCTAssertEqual(english.string("a"), "A")
+    }
+
+    func testAPinnedVersionThatIsNotPublishedYetIsNotSavedAsEmpty() async throws {
+        let localize = Localize(configuration: configuration(fallback: nil, version: "v3"))
+        let url = URL(string: "\(StubTransport.base)/demo/v3/en/translation.json")!
+        await assertThrows(.http(status: 404, url: url)) { try await localize.refresh() }
+        XCTAssertNil(localize.version)
+        XCTAssertEqual(savedFiles, [])
+
+        // Once it is published the same instance, and a later launch, get it.
+        stub.publish("v3", ["en/translation": ["a": "third"]])
+        let result = try await localize.refresh()
+        XCTAssertEqual(result, .updated(version: "v3"))
+        XCTAssertEqual(localize.string("a"), "third")
+        let relaunched = Localize(configuration: configuration(version: "v3"))
+        XCTAssertEqual(relaunched.string("a"), "third")
+    }
+
+    /// A sparse variant with no file at all is still normal for a pinned
+    /// version, as long as the version has some file.
+    func testAPinnedVersionMayLackAVariantFile() async throws {
+        stub.publish("v3", ["en/translation": ["a": "third"]])
+        let localize = Localize(configuration: configuration(locale: "en-FI", version: "v3"))
+        let result = try await localize.refresh()
+        XCTAssertEqual(result, .updated(version: "v3"))
+        XCTAssertEqual(localize.string("a"), "third")
+    }
+
+    func testASavedReleaseOfAnotherVersionIsNotUsedUnderAPin() async throws {
+        stub.setPointer("v2")
+        stub.publish("v2", ["en/translation": ["a": "second"]])
+        let following = Localize(configuration: configuration())
+        try await following.refresh()
+        XCTAssertEqual(savedFiles, ["current.json", "v2.json"])
+
+        // The app now ships pinned to v1 and starts offline.
+        stub.goOffline()
+        let pinned = Localize(configuration: configuration(version: "v1"))
+        XCTAssertNil(pinned.version)
+        XCTAssertEqual(pinned.string("a"), "a")
+        for policy in [LocalizeUpdatePolicy.immediately, .nextLaunch] {
+            let other = Localize(configuration: configuration(version: "v1", policy: policy))
+            XCTAssertNil(other.version, "\(policy)")
+        }
+        // A launch pinned to the saved version uses it.
+        XCTAssertEqual(Localize(configuration: configuration(version: "v2")).string("a"), "second")
+    }
+
     // MARK: Next launch
+
+    /// With the next-launch policy a newer release waits, but files missing
+    /// from the release the launch started with are added to it at once.
+    func testNextLaunchPolicyCompletesTheSavedReleaseForANewLanguage() async throws {
+        _ = try await loaded(["en/translation": ["a": "A"], "de/translation": ["a": "A auf Deutsch"]])
+        let german = Localize(configuration: configuration(locale: "de", fallback: "en", policy: .nextLaunch))
+        XCTAssertNil(german.version)
+        let updates = german.updates
+
+        let result = try await german.refresh()
+
+        XCTAssertEqual(result, .updated(version: "v1"))
+        XCTAssertEqual(german.string("a"), "A auf Deutsch")
+        let announced = await nextValue(of: updates)
+        XCTAssertEqual(announced, "v1")
+        let again = try await german.refresh()
+        XCTAssertEqual(again, .upToDate(version: "v1"))
+    }
+
+    func testNextLaunchPolicyKeepsANewerReleaseForTheNextLaunchAfterALanguageChange() async throws {
+        _ = try await loaded(["en/translation": ["a": "A"]])
+        stub.setPointer("v2")
+        stub.publish("v2", ["en/translation": ["a": "A2"], "de/translation": ["a": "A2 auf Deutsch"]])
+        let german = Localize(configuration: configuration(locale: "de", fallback: "en", policy: .nextLaunch))
+
+        let result = try await german.refresh()
+
+        XCTAssertEqual(result, .pendingNextLaunch(version: "v2"))
+        XCTAssertNil(german.version)
+        XCTAssertEqual(german.string("a"), "a")
+        let next = Localize(configuration: configuration(locale: "de", fallback: "en", policy: .nextLaunch))
+        XCTAssertEqual(next.string("a"), "A2 auf Deutsch")
+    }
 
     func testNextLaunchPolicyAppliesADownloadOnlyAtTheNextLaunch() async throws {
         stub.setPointer("v1")
@@ -690,7 +788,42 @@ final class RefreshTests: LocalizeTestCase {
 
     // MARK: Shared instance
 
+    /// `configure` called again while the earlier instance is still
+    /// downloading: the earlier one must not save over the later one.
+    func testAReplacedInstanceSavesNothing() async throws {
+        addTeardownBlock { Localize.resetShared() }
+        stub.setPointer("v1")
+        stub.publish("v1", ["en/translation": ["a": "A"], "et/translation": ["a": "A eesti keeles"]])
+        let gate = Gate()
+        stub.afterEachRequest { path in
+            if path == "/demo/v1/en/translation.json" { await gate.wait() }
+        }
+        let english = Localize.configure(configuration(locale: "en"), refresh: false)
+        let stalled = Task { try await english.refresh() }
+        // Wait until the English download is under way.
+        while stub.requestCount("/demo/v1/en/translation.json") == 0 { await Task.yield() }
+
+        // The app switches to Estonian.
+        let estonian = Localize.configure(configuration(locale: "et"), refresh: false)
+        let result = try await estonian.refresh()
+        XCTAssertEqual(result, .updated(version: "v1"))
+
+        await gate.open()
+        do {
+            _ = try await stalled.value
+            XCTFail("expected the replaced instance to stop")
+        } catch let error as LocalizeError {
+            XCTAssertEqual(error, .replaced)
+        }
+        XCTAssertNil(english.version)
+        // What is saved is still the Estonian release.
+        stub.goOffline()
+        let relaunched = Localize(configuration: configuration(locale: "et"))
+        XCTAssertEqual(relaunched.string("a"), "A eesti keeles")
+    }
+
     func testTheSharedInstance() async throws {
+        addTeardownBlock { Localize.resetShared() }
         // Before configure: no project.
         let unconfigured = Localize.shared
         XCTAssertEqual(unconfigured.string("nav.home"), "nav.home")

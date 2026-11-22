@@ -36,9 +36,10 @@ struct ReleaseLoader: Sendable {
         }
     }
 
-    /// One file of a version. A file the version does not have is empty:
-    /// regional variants publish only their overrides, and often none.
-    func file(version: String, file: FileKey) async throws -> [String: Node] {
+    /// One file of a version, or nil when the version does not have it.
+    /// That is normal: regional variants publish only their overrides, and
+    /// often none.
+    func file(version: String, file: FileKey) async throws -> [String: Node]? {
         let url = try fileURL(version: version, file: file)
         let response = try await get(url)
         switch response.statusCode {
@@ -48,7 +49,7 @@ struct ReleaseLoader: Sendable {
             }
             return contents
         case 404:
-            return [:]
+            return nil
         default:
             throw LocalizeError.http(status: response.statusCode, url: url)
         }
