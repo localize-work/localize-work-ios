@@ -589,6 +589,62 @@ final class RefreshTests: LocalizeTestCase {
         XCTAssertEqual(relaunched.string("a"), "A auf Deutsch")
     }
 
+    /// The same when the app was configured for another project in between
+    /// and then for this one again: it is still the run that started with
+    /// nothing saved for it.
+    func testNextLaunchPolicyShowsNothingDownloadedInTheSameRunAfterAnotherProjectWasConfigured() async throws {
+        addTeardownBlock { Localize.resetShared() }
+        stub.setPointer("v1")
+        stub.publish("v1", ["en/translation": ["a": "A"]])
+        let first = Localize.configure(configuration(policy: .nextLaunch), refresh: false)
+        let downloaded = try await first.refresh()
+        XCTAssertEqual(downloaded, .pendingNextLaunch(version: "v1"))
+
+        var other = configuration(policy: .nextLaunch)
+        other.projectSlug = "other"
+        Localize.configure(other, refresh: false)
+        let back = Localize.configure(configuration(policy: .nextLaunch), refresh: false)
+
+        XCTAssertNil(back.version)
+        XCTAssertEqual(back.string("a", fallback: "bundled"), "bundled")
+        let again = try await back.refresh()
+        XCTAssertEqual(again, .pendingNextLaunch(version: "v1"))
+        XCTAssertNil(back.version)
+
+        // The next launch reads it, offline.
+        Localize.resetShared()
+        stub.goOffline()
+        let relaunched = Localize.configure(configuration(policy: .nextLaunch), refresh: false)
+        XCTAssertEqual(relaunched.string("a"), "A")
+    }
+
+    /// A run that started with a release shows that one after the way to
+    /// another project and back, not the newer one it has saved meanwhile.
+    func testNextLaunchPolicyShowsTheReleaseTheRunStartedWithAfterAnotherProjectWasConfigured() async throws {
+        addTeardownBlock { Localize.resetShared() }
+        _ = try await loaded(["en/translation": ["a": "A1"]])
+        let first = Localize.configure(configuration(policy: .nextLaunch), refresh: false)
+        stub.setPointer("v2")
+        stub.publish("v2", ["en/translation": ["a": "A2"]])
+        let downloaded = try await first.refresh()
+        XCTAssertEqual(downloaded, .pendingNextLaunch(version: "v2"))
+
+        var other = configuration(policy: .nextLaunch)
+        other.projectSlug = "other"
+        Localize.configure(other, refresh: false)
+        let back = Localize.configure(configuration(policy: .nextLaunch), refresh: false)
+
+        XCTAssertEqual(back.string("a"), "A1")
+        let again = try await back.refresh()
+        XCTAssertEqual(again, .pendingNextLaunch(version: "v2"))
+        XCTAssertEqual(back.string("a"), "A1")
+
+        Localize.resetShared()
+        stub.goOffline()
+        let relaunched = Localize.configure(configuration(policy: .nextLaunch), refresh: false)
+        XCTAssertEqual(relaunched.string("a"), "A2")
+    }
+
     func testASavedReleaseWithoutTheNewLanguageStaysUnusedWhenTheDownloadFails() async throws {
         _ = try await loaded(["en/translation": ["a": "A"]])
         stub.goOffline()
@@ -806,6 +862,58 @@ final class RefreshTests: LocalizeTestCase {
         stub.goOffline()
         let next = Localize(configuration: configuration(locale: "en", policy: .nextLaunch))
         XCTAssertEqual(next.string("a"), "A2")
+    }
+
+    /// Two instances of one project. Each has saved a release for the next
+    /// launch, the second a newer one, and then the publisher goes back to
+    /// the older. The first instance has saved that one before, but it is not
+    /// what the device holds now: it is saved again, so the release reported
+    /// as waiting for the next launch is the one that launch reads.
+    func testAReleaseReportedAsWaitingForTheNextLaunchIsTheOneOnTheDevice() async throws {
+        stub.setPointer("v2")
+        stub.publish("v2", ["en/translation": ["a": "A2"]])
+        stub.publish("v3", ["en/translation": ["a": "A3"]])
+        let first = Localize(configuration: configuration(policy: .nextLaunch))
+        let firstResult = try await first.refresh()
+        XCTAssertEqual(firstResult, .pendingNextLaunch(version: "v2"))
+        stub.setPointer("v3")
+        let second = Localize(configuration: configuration(policy: .nextLaunch))
+        let secondResult = try await second.refresh()
+        XCTAssertEqual(secondResult, .pendingNextLaunch(version: "v3"))
+        XCTAssertEqual(savedFiles, ["current.json", "v3.json"])
+
+        stub.setPointer("v2")
+        let rolledBack = try await first.refresh()
+
+        XCTAssertEqual(rolledBack, .pendingNextLaunch(version: "v2"))
+        XCTAssertEqual(savedFiles, ["current.json", "v2.json"])
+        stub.goOffline()
+        let next = Localize(configuration: configuration(policy: .nextLaunch))
+        XCTAssertEqual(next.string("a"), "A2")
+    }
+
+    /// The device could not take the release, so it is in use from memory.
+    /// The next refresh finds nothing newer, and saves what the app reads:
+    /// the next launch has it without a connection.
+    func testAReleaseThatCouldNotBeSavedIsSavedByTheNextRefresh() async throws {
+        stub.setPointer("v1")
+        stub.publish("v1", ["en/translation": ["a": "A"]])
+        // A file where the cache folder should be.
+        try Data().write(to: cacheDirectory)
+        let localize = Localize(configuration: configuration())
+        let first = try await localize.refresh()
+        XCTAssertEqual(first, .updated(version: "v1"))
+        XCTAssertEqual(savedFiles, [])
+
+        try FileManager.default.removeItem(at: cacheDirectory)
+        let second = try await localize.refresh()
+
+        XCTAssertEqual(second, .upToDate(version: "v1"))
+        XCTAssertEqual(savedFiles, ["current.json", "v1.json"])
+        XCTAssertEqual(stub.requestCount("/demo/v1/en/translation.json"), 1)
+        stub.goOffline()
+        let next = Localize(configuration: configuration())
+        XCTAssertEqual(next.string("a"), "A")
     }
 
     /// `configure` called again for a language whose files another instance

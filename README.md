@@ -146,9 +146,11 @@ a file the release does not have counts as empty, and the strings come from
 To change the language while the app runs, call `Localize.configure` again with
 the new `locale`. The instance it replaces stops: a refresh it still has
 under way is dropped (its `refresh()` throws `replaced`, however far it got),
-so it cannot save over the new one, and it puts nothing more in use. The new instance goes on from the release that one held,
-also when that release could not be saved, and streams of
-`Localize.shared.updates` go on with it.
+so it cannot save over the new one, and it puts nothing more in use. The new
+instance goes on from what this run of the app reads of its project, also when
+that release could not be saved, and streams of `Localize.shared.updates` go on
+with it. A release the device could not take is used from memory, and the next
+refresh saves it.
 
 A release is used whole or not at all. When the language has changed since the
 release on the device was saved, that release has no files for the new
@@ -171,7 +173,9 @@ release the app shows:
 1. The release a run shows is decided when the app starts: it is the saved
    release. With `.nextLaunch` it changes only at the next launch, also after
    `Localize.configure` is called again, and a run that started with nothing
-   saved shows bundled strings to its end.
+   saved shows bundled strings to its end. That is kept for each project by
+   itself: an app that configures another project and then the first one
+   again shows what it showed of the first one before.
 2. A release is read only once it has every file the language needs. A saved
    release that lacks files for the language, because the language changed
    before this launch or during the run, is still the release of this run: the
@@ -463,7 +467,8 @@ try await localize.refresh()
 ```
 
 `Localize(configuration:)` creates an instance of your own and downloads nothing
-until you call `refresh()`.
+until you call `refresh()`. Such an instance is a run by itself: it starts from
+the release saved on the device when it is created.
 
 ## Limits of 0.1.0
 

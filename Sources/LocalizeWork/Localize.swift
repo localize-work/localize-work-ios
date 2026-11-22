@@ -49,7 +49,10 @@ public final class Localize: Sendable {
             previous?.retired.withLock { $0 = true }
             let store = storeFor(configuration)
             let instance = Localize(
-                configuration: configuration, store: store, saved: store?.load(), continuing: previous
+                configuration: configuration,
+                store: store,
+                saved: store?.load(),
+                run: store.map { RunKey(directory: $0.directory, source: $0.source, version: configuration.version) }
             )
             // A view listens to `Localize.shared.updates` once, for as long
             // as it is on screen. Its stream goes on with the new instance.
@@ -69,13 +72,15 @@ public final class Localize: Sendable {
         return instance
     }
 
-    /// Puts ``shared`` back to its state before `configure`. For tests.
+    /// Puts ``shared`` back to its state before `configure`, as when the
+    /// app starts: what follows is a new run. For tests.
     static func resetShared() {
         commitLock.withLock { _ in
             sharedInstance.withLock { shared in
                 shared?.retired.withLock { $0 = true }
                 shared = nil
             }
+            runs.withLock { $0 = [:] }
         }
     }
 
@@ -87,8 +92,31 @@ public final class Localize: Sendable {
     /// take the folder for a damaged one and delete it.
     private static let commitLock = Locked<Void>(())
     private static let unconfigured = Localize(
-        configuration: LocalizeConfiguration(projectSlug: ""), store: nil, saved: nil, continuing: nil
+        configuration: LocalizeConfiguration(projectSlug: ""), store: nil, saved: nil, run: nil
     )
+
+    /// What identifies the releases a configuration reads from the device:
+    /// where they are kept, the CDN they came from, and the pinned version.
+    private struct RunKey: Hashable {
+        let directory: URL
+        let source: String
+        let version: String?
+    }
+
+    /// What this run of the app reads of one project.
+    private struct Run {
+        /// See ``State/held``. Nil when the run has no release of the project.
+        var held: Release?
+    }
+
+    /// What this run of the app reads of every project `configure` was
+    /// called for. The release a run shows is decided when the app starts,
+    /// and `configure` may be called many times after that: for another
+    /// language, or for another project and then the first one again. Every
+    /// one of those is still the same run. So the first `configure` of a
+    /// project reads the device, and every later one goes on from what is
+    /// kept here. Read and written under `commitLock`.
+    private static let runs = Locked<[RunKey: Run]>([:])
     private static let log = Logger(subsystem: "work.localize.sdk", category: "LocalizeWork")
 
     // MARK: Instance
@@ -98,6 +126,9 @@ public final class Localize: Sendable {
     /// The locales a string is looked up in, most specific first.
     private let localeChain: [String]
     private let store: ReleaseStore?
+    /// The entry of ``runs`` this instance keeps up to date; nil for an
+    /// instance of the app's own, which is a run by itself.
+    private let run: RunKey?
     private let state: Locked<State>
 
     /// Set when a later `configure` call replaced this instance.
@@ -127,7 +158,7 @@ public final class Localize: Sendable {
     public convenience init(configuration: LocalizeConfiguration) {
         let store = Self.storeFor(configuration)
         let saved = Self.commitLock.withLock { _ in store?.load() }
-        self.init(configuration: configuration, store: store, saved: saved, continuing: nil)
+        self.init(configuration: configuration, store: store, saved: saved, run: nil)
     }
 
     /// Where the releases of this configuration's project are kept; nil
@@ -141,42 +172,40 @@ public final class Localize: Sendable {
 
     /// - Parameters:
     ///   - onDevice: What `store` holds, read under `commitLock`.
-    ///   - previous: The instance this one takes the place of while the app
-    ///     keeps running, as when the language is changed.
+    ///   - run: The entry of ``runs`` for an instance `configure` makes,
+    ///     which is then called under `commitLock`.
     private init(
         configuration: LocalizeConfiguration,
         store: ReleaseStore?,
         saved onDevice: Release?,
-        continuing previous: Localize?
+        run: RunKey?
     ) {
         self.configuration = configuration
         localeChain = configuration.localeChain
         self.store = store
+        self.run = run
         // A saved release of another version than the pinned one is not the
         // release this configuration asks for.
-        let matchesPin: (Release) -> Bool = { release in
-            configuration.version == nil || release.version == configuration.version
+        let saved = onDevice.flatMap { release in
+            configuration.version == nil || release.version == configuration.version ? release : nil
         }
-        let saved = onDevice.flatMap { matchesPin($0) ? $0 : nil }
-        // An instance that takes over from another one for the same project
-        // (a change of language) is still the same run of the app, and goes
-        // on from the release that one held.
+        // The release a run shows is decided when the app starts: for the
+        // first instance of a project in this run, it is the saved one.
         var started = saved
-        if let previous, let store, let theirs = previous.store,
-           theirs.directory == store.directory, theirs.source == store.source {
-            let held = previous.state.withLock({ $0.held }).flatMap { matchesPin($0) ? $0 : nil }
+        if let run, let known = Self.runs.withLock({ $0[run] }) {
+            // A later instance is still the same run, and goes on from what
+            // the run reads by now.
             switch configuration.updatePolicy {
             case .nextLaunch:
-                // The release a run shows is decided when the app starts, so
-                // it is what that instance started with, not what was saved
-                // meanwhile. That holds for a run that started with nothing,
-                // too: it keeps showing bundled strings.
-                started = held
+                // Not from what was saved meanwhile: that waits for the next
+                // launch. A run that started with nothing still has nothing,
+                // and keeps showing bundled strings.
+                started = known.held
             case .immediately:
                 // The newest release is read as soon as it is here, and the
                 // saved one is that. When a release could not be saved it is
                 // in use from memory only, and is not dropped for that.
-                started = saved ?? held
+                started = saved ?? known.held
             }
         }
         // Files of a version never change, and another instance of the
@@ -184,6 +213,9 @@ public final class Localize: Sendable {
         // those of the language asked for now. They belong to the release.
         if let saved, let held = started, held.version == saved.version {
             started = held.adding(saved.files)
+        }
+        if let run {
+            Self.runs.withLock { $0[run] = Run(held: started) }
         }
         // A release is used whole or not at all. After a change of language
         // the saved one lacks the new language's files: until they arrive the
@@ -371,20 +403,19 @@ public final class Localize: Sendable {
         // Reached only with every file in hand.
         let release = Release(version: version, files: files)
 
-        if saved.map({ $0.hasSameContents(as: release) }) != true {
-            do {
-                try save(release)
-            } catch LocalizeError.replaced {
-                throw LocalizeError.replaced
-            } catch {
-                // With the next-launch policy a release that is not saved
-                // never takes effect, so that is a failure. Otherwise the
-                // release is still used for this run.
-                if configuration.updatePolicy == .nextLaunch {
-                    throw LocalizeError.cacheWriteFailed(error.localizedDescription)
-                }
-                Self.log.error("localize.work could not save the release: \(error.localizedDescription, privacy: .public)")
+        // Writes nothing when the device holds this very release already.
+        do {
+            try save(release)
+        } catch LocalizeError.replaced {
+            throw LocalizeError.replaced
+        } catch {
+            // With the next-launch policy a release that is not saved never
+            // takes effect, so that is a failure. Otherwise the release is
+            // still used for this run, and the next refresh saves it.
+            if configuration.updatePolicy == .nextLaunch {
+                throw LocalizeError.cacheWriteFailed(error.localizedDescription)
             }
+            Self.log.error("localize.work could not save the release: \(error.localizedDescription, privacy: .public)")
         }
 
         switch configuration.updatePolicy {
@@ -403,7 +434,7 @@ public final class Localize: Sendable {
         }
     }
 
-    /// Saves `release` as the one on the device.
+    /// Saves `release` as the one on the device, unless it is that already.
     ///
     /// - Parameter replacingAnotherVersion: False for files added to the
     ///   release this run reads. They are saved only while the device still
@@ -415,6 +446,14 @@ public final class Localize: Sendable {
         let onDevice = try Self.commitLock.withLock { _ -> Release in
             if retired.withLock({ $0 }) { throw LocalizeError.replaced }
             guard let store else { throw CocoaError(.fileNoSuchFile) }
+            // Nothing to write when the device holds this very release. What
+            // this instance saved last does not tell: another instance of the
+            // project may have saved another version since, so the device is
+            // asked which one it names.
+            if let known = state.withLock({ $0.saved }), known.hasSameContents(as: release),
+               store.savedVersion() == release.version {
+                return known
+            }
             // Another instance of the project, one in another language say,
             // may have saved files of this version since this one read the
             // device. Files of a version never change, so they are kept.
@@ -499,13 +538,17 @@ public final class Localize: Sendable {
         // are told here too: afterwards they belong to the new instance.
         let changed = try Self.commitLock.withLock { _ -> Bool in
             if retired.withLock({ $0 }) { throw LocalizeError.replaced }
-            return state.withLock { state in
+            let changed = state.withLock { state -> Bool in
                 if let active = state.active, active.hasSameContents(as: release) { return false }
                 state.active = release
                 state.held = release
                 state.streams.announce(version)
                 return true
             }
+            // Whichever instance `configure` makes next for this project
+            // goes on from here.
+            if changed, let run { Self.runs.withLock { $0[run] = Run(held: release) } }
+            return changed
         }
         guard changed else { return false }
         await MainActor.run {

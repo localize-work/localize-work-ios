@@ -36,6 +36,13 @@ struct ReleaseStore: Sendable {
         }
     }
 
+    /// The version of the saved release, read from the file that names it;
+    /// nil when there is none or it cannot be read.
+    func savedVersion() -> String? {
+        guard case .some(.some(let pointer)) = data(at: currentURL) else { return nil }
+        return ReleaseJSON.pointerVersion(from: pointer)
+    }
+
     /// Saves `release` as the current one and deletes every other version.
     func save(_ release: Release) throws {
         guard ReleaseJSON.isValidVersion(release.version) else {
