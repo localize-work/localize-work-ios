@@ -50,15 +50,15 @@ struct Release: Sendable {
         Release(version: version, files: files.merging(more) { held, _ in held })
     }
 
-    /// Whether the release has texts in a shorter form of `locale`: for
-    /// `en-FI`, a file of `en` that is not empty. A regional locale of such a
-    /// language is complete without a file of its own.
-    func hasTexts(inABaseOf locale: String) -> Bool {
+    /// Whether the release has texts in `locale` or a shorter form of it:
+    /// for `en-FI`, a file of `en-FI` or `en` that is not empty. Such a
+    /// locale is complete without a file of its own for every namespace.
+    func hasTexts(for locale: String) -> Bool {
         var parts = locale.split(separator: "-")
-        while parts.count > 1 {
+        while !parts.isEmpty {
+            let form = parts.joined(separator: "-")
+            if files.contains(where: { $0.key.locale == form && !$0.value.isEmpty }) { return true }
             parts.removeLast()
-            let base = parts.joined(separator: "-")
-            if files.contains(where: { $0.key.locale == base && !$0.value.isEmpty }) { return true }
         }
         return false
     }

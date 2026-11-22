@@ -81,6 +81,9 @@ final class PluralRulesTests: XCTestCase {
 
     func testLanguagesWithoutPluralForms() {
         assertCategories("ja zh ko vi th id", [(0...30, .other), (1_000_000...1_000_000, .other)])
+        // `und`, a locale without a language, is in CLDR's table with these.
+        // It is not in the fixture: ICU answers for it by the device's language.
+        assertCategories("und", [(0...30, .other), (1_000_000...1_000_000, .other)])
     }
 
     func testAnUnknownLanguageUsesOneAndOther() {

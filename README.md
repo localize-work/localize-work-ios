@@ -146,7 +146,7 @@ a file the release does not have counts as empty, and the strings come from
 To change the language while the app runs, call `Localize.configure` again with
 the new `locale`. The instance it replaces stops: a download it still has
 under way is dropped (its `refresh()` throws `replaced`), so it cannot save
-over the new one. The new instance goes on from the release that one held,
+over the new one, and it puts nothing more in use. The new instance goes on from the release that one held,
 also when that release could not be saved, and streams of
 `Localize.shared.updates` go on with it.
 
@@ -168,14 +168,17 @@ first launch that means bundled strings until the second launch.
 A change of language does not end the run, and by itself never changes which
 release the app shows:
 
-1. The release a run shows is decided when the app starts: the saved release
-   if it is whole for the language, otherwise none. With `.nextLaunch` it
-   changes only at the next launch, also after `Localize.configure` is called
-   again. A run that started with no release shows bundled strings to its end.
-2. After a change of language, the files that release lacks for the new
-   language are fetched from that same release and added to it, since no text
-   the app already shows from it changes. This needs neither the newest
-   release nor `latest.json` to be reachable.
+1. The release a run shows is decided when the app starts: it is the saved
+   release. With `.nextLaunch` it changes only at the next launch, also after
+   `Localize.configure` is called again, and a run that started with nothing
+   saved shows bundled strings to its end.
+2. A release is read only once it has every file the language needs. A saved
+   release that lacks files for the language, because the language changed
+   before this launch or during the run, is still the release of this run: the
+   app shows bundled strings only until the missing files have arrived. They
+   are fetched from that same release and added to it, since no text the app
+   already shows from it changes. This needs neither the newest release nor
+   `latest.json` to be reachable.
 3. A newer release is handled as always: with `.nextLaunch` it waits for the
    next launch, with `.immediately` it is used once it is complete. If it
    cannot be downloaded, `refresh()` throws, and step 2 still holds.
@@ -185,15 +188,18 @@ depends on whether the release is known to be the published one:
 
 - Once `latest.json` has named that release, it is read like any other: a file
   it does not have counts as empty, and the strings come from the fallback
-  locale. A launch in that language reads the same.
+  locale. A launch in that language reads the same. A pinned `version` names
+  the release in the same way, and `latest.json` is not read at all.
 - Until then the app shows its bundled strings. That is while `latest.json`
   cannot be read, and with `.nextLaunch` also while it names a newer release,
   which waits for the next launch. A release that answers "not found" for every
   file of a language may also be one the CDN no longer keeps, and the bundled
-  strings are in the user's language.
+  strings are in the user's language. A file of the fallback locale does not
+  count as an answer here: it says nothing about the new language.
 
 A regional locale such as `en-FI` needs no file of its own for any of this:
-the release's `en` texts are enough.
+the release's `en` texts are enough. The same goes for a namespace the release
+has no file for in a language it otherwise has texts in.
 
 ## Looking up strings
 
@@ -356,15 +362,21 @@ version. A refresh that finds nothing new costs one small request.
   at once with no network.
 - A saved release is used only when it is the one the configuration asks for:
   it has every file the current language needs, and with a pinned `version` it
-  is that version. Otherwise the app shows bundled strings until a refresh
-  succeeds.
+  is that version. A release that lacks files of the current language is used
+  once a refresh has fetched them from it; until then, and while the saved
+  release is another version than the pinned one, the app shows bundled
+  strings.
 - A pinned `version` that is not published yet makes `refresh()` fail (HTTP
   404) and saves nothing, so the release is picked up once it exists.
 - When a newer release is saved, older ones are deleted.
 - A saved release that cannot be read (a damaged or half-written file) is
   deleted and treated as absent. The app shows bundled strings until the next
   download.
-- A failed refresh changes nothing: not what is shown, and not what is saved.
+- A failed refresh leaves the release in use, and the saved one, as they
+  were. One thing may have changed all the same: after a change of language,
+  the files the release lacked for the new language are fetched from that same
+  release first, and are shown and saved even when the rest of the refresh
+  fails.
 - Releases are saved in the app's Application Support folder (Caches on tvOS),
   excluded from device backups.
 

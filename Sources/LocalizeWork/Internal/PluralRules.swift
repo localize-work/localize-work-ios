@@ -187,7 +187,7 @@ enum PluralRules {
     /// table states what was checked.
     private static let families: [String: Family] = {
         let groups: [(Family, String)] = [
-            (.none, "bm bo dz hnj id ig ii in ja jbo jv jw kde kea km ko lkt lo ms my nqo osa sah ses sg su th to tpi vi wo yo yue zh"),
+            (.none, "bm bo dz hnj id ig ii in ja jbo jv jw kde kea km ko lkt lo ms my nqo osa sah ses sg su th to tpi und vi wo yo yue zh"),
             (.oneIsOne, """
                 af an asa ast az bal bem bez bg brx ce cgg chr ckb da de dv ee el en eo et eu fi fo fur fy gl gsw ha haw \
                 hu ia io jgo ji jmc ka kaj kcg kk kkj kl ks ksb ku ky lb lg lij mas mgo ml mn mr nah nb nd ne nl nn nnh no \

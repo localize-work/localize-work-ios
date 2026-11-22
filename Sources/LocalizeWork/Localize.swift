@@ -159,6 +159,12 @@ public final class Localize: Sendable {
                 started = saved ?? held
             }
         }
+        // Files of a version never change, and another instance of the
+        // project may have saved more of the version this run reads, such as
+        // those of the language asked for now. They belong to the release.
+        if let saved, let held = started, held.version == saved.version {
+            started = held.adding(saved.files)
+        }
         // A release is used whole or not at all. After a change of language
         // the saved one lacks the new language's files: until they arrive the
         // app's bundled strings, which are in that language, are the better text.
@@ -256,15 +262,26 @@ public final class Localize: Sendable {
     ///
     /// The release is used only once every file of it has arrived. If
     /// anything fails this throws a ``LocalizeError`` and the release that
-    /// was in use stays in use. Calls made while a refresh is running wait
-    /// for that refresh and share its result.
+    /// was in use stays in use. One thing may have changed all the same:
+    /// after a change of language, the files the release this run reads
+    /// lacked for the new language are fetched from that same version first,
+    /// and are used and saved even when the rest of the refresh fails. Calls
+    /// made while a refresh is running wait for that refresh and share its
+    /// result.
     @discardableResult
     public func refresh() async throws -> LocalizeRefreshResult {
         let task = state.withLock { state -> Task<LocalizeRefreshResult, Error> in
             if let running = state.refresh { return running }
             let task = Task { [self] in
                 defer { self.state.withLock { $0.refresh = nil } }
-                return try await performRefresh()
+                do {
+                    return try await performRefresh()
+                } catch {
+                    // Whatever went wrong for an instance that was replaced
+                    // meanwhile, its caller should hear that it was replaced.
+                    if retired.withLock({ $0 }) { throw LocalizeError.replaced }
+                    throw error
+                }
             }
             state.refresh = task
             return task
@@ -286,7 +303,7 @@ public final class Localize: Sendable {
         // language it lacks the new language's files; they come from that
         // same version, whatever is published now and whether or not the
         // pointer or a newer release can be reached.
-        let completedHeld = await completeHeldRelease(needed, loader)
+        let completedHeld = try await completeHeldRelease(needed, loader)
 
         // The pointer is read once. Every file below comes from the version
         // it named, whatever is published in the meantime. A version the
@@ -349,7 +366,7 @@ public final class Localize: Sendable {
 
         switch configuration.updatePolicy {
         case .immediately:
-            let changed = await use(release)
+            let changed = try await use(release)
             return changed || completedHeld ? .updated(version: version) : .upToDate(version: version)
         case .nextLaunch:
             // The published release is used in this run only when it is the
@@ -358,64 +375,79 @@ public final class Localize: Sendable {
             // for the next launch, and a run that started with no release
             // keeps showing bundled strings.
             guard let held, held.version == version else { return .pendingNextLaunch(version: version) }
-            let changed = await use(held.adding(release.files))
+            let changed = try await use(held.adding(release.files))
             return changed || completedHeld ? .updated(version: version) : .upToDate(version: version)
         }
     }
 
     /// Saves `release` as the one on the device.
-    private func save(_ release: Release) throws {
+    ///
+    /// - Parameter replacingAnotherVersion: False for files added to the
+    ///   release this run reads. They are saved only while the device still
+    ///   names that version: another instance of the project may have saved
+    ///   a newer release since, and that one is for the next launch to read.
+    private func save(_ release: Release, replacingAnotherVersion: Bool = true) throws {
         // An instance that `configure` has replaced must not write its
         // release over the one its replacement saves.
-        let written = try Self.commitLock.withLock { _ -> Release in
+        let onDevice = try Self.commitLock.withLock { _ -> Release in
             if retired.withLock({ $0 }) { throw LocalizeError.replaced }
             guard let store else { throw CocoaError(.fileNoSuchFile) }
             // Another instance of the project, one in another language say,
             // may have saved files of this version since this one read the
             // device. Files of a version never change, so they are kept.
             var whole = release
-            if let there = store.load(), there.version == release.version {
-                whole = release.adding(there.files)
+            if let there = store.load() {
+                if there.version == release.version {
+                    whole = release.adding(there.files)
+                } else if !replacingAnotherVersion {
+                    return there
+                }
             }
             try store.save(whole)
             return whole
         }
-        state.withLock { $0.saved = written }
+        state.withLock { $0.saved = onDevice }
     }
 
     /// Makes the release this run reads whole for the current language, from
     /// its own version, and puts it in use. True when that changed what
     /// lookups read. Nothing is thrown: when the files cannot be had now, the
-    /// app shows bundled strings and the next refresh tries again.
-    private func completeHeldRelease(_ needed: [FileKey], _ loader: ReleaseLoader) async -> Bool {
+    /// app shows bundled strings and the next refresh tries again. The one
+    /// error is ``LocalizeError/replaced``, of an instance that has been
+    /// replaced and so puts nothing in use any more.
+    private func completeHeldRelease(_ needed: [FileKey], _ loader: ReleaseLoader) async throws -> Bool {
         let (active, held, saved) = state.withLock { ($0.active, $0.held, $0.saved) }
         guard active == nil, let held, let whole = await completed(held, needed, loader) else { return false }
         // The copy on the device gets the files too while it is this
         // version, so the next launch starts whole. A failure only costs
         // that; the files are in use from memory.
         if let saved, saved.version == whole.version {
-            try? save(saved.adding(whole.files))
+            try? save(whole, replacingAnotherVersion: false)
         }
-        return await use(whole)
+        return try await use(whole)
     }
 
     /// `release` with the files of `needed` it lacks, fetched from its own
     /// version; nil when it cannot be made whole.
     ///
-    /// When none of the missing files exists, the release may be gone from
-    /// the CDN, and reading it with empty files would show its fallback
-    /// language in place of the app's bundled strings. It is completed all
-    /// the same when every locale that lacks files is a regional form of a
-    /// language the release has texts for: a regional locale without
-    /// overrides of its own has no file, and that is normal.
+    /// When none of the missing files of the language asked for exists, the
+    /// release may be gone from the CDN, or have nothing in that language,
+    /// and reading it with empty files would show its fallback language in
+    /// place of the app's bundled strings. A file of the fallback locale
+    /// says nothing about that. The release is completed all the same when
+    /// it already has texts for every locale of the language that lacks
+    /// files, in that locale or a shorter form of it: a regional locale
+    /// without overrides of its own has no file, and that is normal.
     private func completed(_ release: Release, _ needed: [FileKey], _ loader: ReleaseLoader) async -> Release? {
         let missing = needed.filter { release.files[$0] == nil }
+        // The locale asked for and its shorter forms, without the fallback locale.
+        let asked = Set(LocaleCode.chain(locale: configuration.locale, fallback: nil))
         var files: [FileKey: [String: Node]] = [:]
         var found = false
         for file in missing {
             do {
                 if let contents = try await loader.file(version: release.version, file: file) {
-                    found = true
+                    if asked.contains(file.locale) { found = true }
                     files[file] = contents
                 } else {
                     // A file the version does not have is an empty file.
@@ -426,23 +458,32 @@ public final class Localize: Sendable {
                 return nil
             }
         }
-        if !found, !Set(missing.map(\.locale)).allSatisfy({ release.hasTexts(inABaseOf: $0) }) { return nil }
+        let lacking = Set(missing.map(\.locale)).intersection(asked)
+        if !found, !lacking.allSatisfy({ release.hasTexts(for: $0) }) { return nil }
         return release.adding(files)
     }
 
     /// Makes `release` the one lookups read and announces it. False when it
-    /// is what they read already.
-    private func use(_ release: Release) async -> Bool {
-        let streams = state.withLock { state -> UpdateStreams? in
-            if let active = state.active, active.hasSameContents(as: release) { return nil }
-            state.active = release
-            state.held = release
-            return state.streams
-        }
-        guard let streams else { return false }
+    /// is what they read already. An instance that has been replaced puts
+    /// nothing in use and announces nothing: it throws ``LocalizeError/replaced``.
+    private func use(_ release: Release) async throws -> Bool {
         let version = release.version
-        streams.announce(version)
+        // Under the lock an instance is retired under, so this happens
+        // wholly before the instance is replaced or not at all. The streams
+        // are told here too: afterwards they belong to the new instance.
+        let changed = try Self.commitLock.withLock { _ -> Bool in
+            if retired.withLock({ $0 }) { throw LocalizeError.replaced }
+            return state.withLock { state in
+                if let active = state.active, active.hasSameContents(as: release) { return false }
+                state.active = release
+                state.held = release
+                state.streams.announce(version)
+                return true
+            }
+        }
+        guard changed else { return false }
         await MainActor.run {
+            if retired.withLock({ $0 }) { return }
             NotificationCenter.default.post(
                 name: Self.didUpdateNotification,
                 object: self,
