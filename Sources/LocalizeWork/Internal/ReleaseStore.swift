@@ -21,15 +21,19 @@ struct ReleaseStore: Sendable {
         source = cdnBaseURL.absoluteString
     }
 
-    /// The saved release, or nil when there is none. Anything unreadable or
-    /// out of place is deleted and counts as none.
+    /// The saved release, or nil when there is none. A saved release that is
+    /// damaged or incomplete is deleted and counts as none.
     func load() -> Release? {
         guard FileManager.default.fileExists(atPath: directory.path) else { return nil }
-        guard let release = read() else {
+        switch read() {
+        case .release(let release):
+            return release
+        case .damaged:
             discard()
             return nil
+        case .unreadable:
+            return nil
         }
-        return release
     }
 
     /// Saves `release` as the current one and deletes every other version.
@@ -67,26 +71,48 @@ struct ReleaseStore: Sendable {
         try? FileManager.default.removeItem(at: directory)
     }
 
-    private func read() -> Release? {
-        guard let pointer = try? Data(contentsOf: currentURL),
-              let version = ReleaseJSON.pointerVersion(from: pointer),
-              let data = try? Data(contentsOf: releaseURL(version)),
+    private enum Saved {
+        case release(Release)
+        /// Not a complete, valid release of this project.
+        case damaged
+        /// The files could not be read at all, as on a device that has not
+        /// been unlocked since it started. They may be fine, so they stay.
+        case unreadable
+    }
+
+    private func read() -> Saved {
+        guard let pointer = data(at: currentURL) else { return .unreadable }
+        guard let pointer, let version = ReleaseJSON.pointerVersion(from: pointer) else { return .damaged }
+        guard let data = data(at: releaseURL(version)) else { return .unreadable }
+        guard let data,
               let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               body["format"] as? Int == Self.format,
               body["projectSlug"] as? String == projectSlug,
               body["source"] as? String == source,
               body["version"] as? String == version,
               let entries = body["files"] as? [[String: Any]]
-        else { return nil }
+        else { return .damaged }
         var files: [FileKey: [String: Node]] = [:]
         for entry in entries {
             guard let locale = entry["locale"] as? String,
                   let namespace = entry["namespace"] as? String,
                   let contents = entry["contents"] as? [String: Any]
-            else { return nil }
+            else { return .damaged }
             files[FileKey(locale: locale, namespace: namespace)] = contents.mapValues(Node.init(json:))
         }
-        return Release(version: version, files: files)
+        return .release(Release(version: version, files: files))
+    }
+
+    /// A file's bytes; `.some(nil)` when the file does not exist, and nil
+    /// when it exists but cannot be read.
+    private func data(at url: URL) -> Data?? {
+        do {
+            return .some(try Data(contentsOf: url))
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            return .some(nil)
+        } catch {
+            return nil
+        }
     }
 
     private func removeEverything(except kept: Set<String>) {

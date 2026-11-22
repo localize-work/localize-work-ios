@@ -386,6 +386,34 @@ final class RefreshTests: LocalizeTestCase {
         }
     }
 
+    /// Before the first unlock after a restart the saved files exist but
+    /// cannot be read. They are left alone, not taken for damaged.
+    func testASavedReleaseThatCannotBeReadYetIsKept() async throws {
+        _ = try await loaded(["en/translation": ["a": "A"]])
+        let folder = cacheDirectory.appendingPathComponent("demo")
+        let release = folder.appendingPathComponent("v1.json")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: release.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: release.path) }
+
+        let locked = Localize(configuration: configuration())
+        XCTAssertNil(locked.version)
+        XCTAssertEqual(locked.string("a"), "a")
+        XCTAssertEqual(savedFiles, ["current.json", "v1.json"])
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: release.path)
+        XCTAssertEqual(Localize(configuration: configuration()).string("a"), "A")
+    }
+
+    func testStreamsEndWhenTheInstanceGoesAway() async throws {
+        var localize: Localize? = Localize(configuration: configuration())
+        let updates = try XCTUnwrap(localize?.updates)
+        localize = nil
+        let started = Date()
+        let value = await nextValue(of: updates, timeout: 5)
+        XCTAssertNil(value)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2, "the stream ended by timing out")
+    }
+
     func testAReleaseSavedFromAnotherCDNIsNotUsed() async throws {
         _ = try await loaded(["en/translation": ["a": "A"]])
         var other = configuration()
@@ -682,9 +710,11 @@ final class RefreshTests: LocalizeTestCase {
         let background = Localize.configure(configuration())
         XCTAssertTrue(Localize.shared === background)
         let updates = background.updates
+        let notified = expectation(forNotification: Localize.didUpdateNotification, object: background)
         await gate.open()
         let version = await nextValue(of: updates)
         XCTAssertEqual(version, "v1")
+        await fulfillment(of: [notified], timeout: 2)
         XCTAssertEqual(Localize.shared.string("nav.home"), "Home")
     }
 }

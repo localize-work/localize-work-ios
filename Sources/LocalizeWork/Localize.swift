@@ -91,6 +91,12 @@ public final class Localize: Sendable {
         state = Locked(State(active: saved, saved: saved))
     }
 
+    deinit {
+        // End the streams, or a consumer would wait on them forever.
+        let observers = state.withLock { Array($0.observers.values) }
+        for observer in observers { observer.finish() }
+    }
+
     /// The release version in use, such as `"v12"`. Nil until a release has
     /// been downloaded or loaded from the device.
     public var version: String? {
