@@ -66,13 +66,25 @@ struct ReleaseLoader: Sendable {
     }
 
     private func url(path: [String], file: String) throws -> URL {
-        var base = cdnBaseURL.absoluteString
-        while base.hasSuffix("/") { base.removeLast() }
-        let text = ([base] + path.map(Self.segment) + [file]).joined(separator: "/")
+        let text = ([Self.base(cdnBaseURL)] + path.map(Self.segment) + [file]).joined(separator: "/")
         guard let url = URL(string: text) else {
             throw LocalizeError.invalidConfiguration("cannot build a URL from \(text)")
         }
         return url
+    }
+
+    /// The CDN's address as every request starts with it: without slashes at
+    /// the end. It is also what names the CDN wherever two configurations are
+    /// asked whether they read the same one, so `https://cdn.example` and
+    /// `https://cdn.example/` are one CDN.
+    static func base(_ cdnBaseURL: URL) -> String {
+        base(cdnBaseURL.absoluteString)
+    }
+
+    static func base(_ address: String) -> String {
+        var base = address
+        while base.hasSuffix("/") { base.removeLast() }
+        return base
     }
 
     /// One path segment, escaped as JavaScript's `encodeURIComponent` does,

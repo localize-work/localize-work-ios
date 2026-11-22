@@ -1006,11 +1006,14 @@ final class RefreshTests: LocalizeTestCase {
         stub.publish("v2", ["en/translation": ["a": "A2"]])
         let result = try await localize.refresh()
 
-        XCTAssertEqual(result, .pendingNextLaunch(version: "v2"))
+        XCTAssertEqual(result, .updated(version: "v1"))
         XCTAssertEqual(localize.version, "v1")
         XCTAssertEqual(localize.string("a"), "A")
         let announced = await nextValue(of: updates)
         XCTAssertEqual(announced, "v1")
+        XCTAssertEqual(savedFiles, ["current.json", "v2.json"])
+        let next = try await localize.refresh()
+        XCTAssertEqual(next, .pendingNextLaunch(version: "v2"))
         // It is the run's release for a later `configure` too.
         let again = Localize.configure(configuration(policy: .nextLaunch), refresh: false)
         XCTAssertEqual(again.string("a"), "A")
@@ -1171,6 +1174,115 @@ final class RefreshTests: LocalizeTestCase {
         }
     }
 
+    /// The folder is the same one before the project's folder exists and
+    /// after. A first launch creates it, and `configure` called after that is
+    /// still the same run: what it downloaded keeps waiting. The two paths
+    /// here are the ones Foundation writes differently once they exist: one
+    /// under `/private`, as an app group's container is, and one through a
+    /// symbolic link.
+    func testTheCacheFolderIsTheSameRunBeforeAndAfterItIsCreated() async throws {
+        addTeardownBlock { Localize.resetShared() }
+        let resolved = try XCTUnwrap(realpath(NSTemporaryDirectory(), nil))
+        defer { free(resolved) }
+        let temporary = URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
+        XCTAssertTrue(temporary.path.hasPrefix("/private/"), temporary.path)
+        let underPrivate = temporary.appendingPathComponent("LocalizeWorkTests-private-\(UUID().uuidString)")
+        let target = temporary.appendingPathComponent("LocalizeWorkTests-target-\(UUID().uuidString)")
+        let link = temporary.appendingPathComponent("LocalizeWorkTests-link-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        defer { [underPrivate, target, link].forEach { try? FileManager.default.removeItem(at: $0) } }
+
+        for folder in [underPrivate, link] {
+            Localize.resetShared()
+            stub = StubTransport()
+            stub.setPointer("v1")
+            stub.publish("v1", ["en/translation": ["a": "A"], "de/translation": ["a": "A auf Deutsch"]])
+            var first = configuration(policy: .nextLaunch)
+            first.cacheDirectory = folder
+            let started = Localize.configure(first, refresh: false)
+            XCTAssertNil(started.version, folder.path)
+            let downloaded = try await started.refresh()
+            XCTAssertEqual(downloaded, .pendingNextLaunch(version: "v1"), folder.path)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent("demo").path))
+
+            for locale in ["en", "de"] {
+                var other = configuration(locale: locale, policy: .nextLaunch)
+                other.cacheDirectory = folder
+                let again = Localize.configure(other, refresh: false)
+                XCTAssertNil(again.version, "\(folder.path) \(locale)")
+                XCTAssertEqual(again.string("a", fallback: "bundled"), "bundled", "\(folder.path) \(locale)")
+            }
+        }
+    }
+
+    /// The name itself, for a folder that does not exist yet and the same
+    /// one once it does, however deep the part that is missing.
+    func testTheCacheFolderHasOneNameBeforeAndAfterItIsCreated() throws {
+        let link = cacheDirectory.deletingLastPathComponent()
+            .appendingPathComponent("LocalizeWorkTests-link-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: link) }
+        let base = URL(string: StubTransport.base)!
+        // Nothing of the path exists yet, not even the folder the link is for.
+        let direct = ReleaseStore(root: cacheDirectory.appendingPathComponent("deep"), projectSlug: "demo", cdnBaseURL: base)
+        let before = direct.folderIdentity
+        try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: cacheDirectory)
+        let linked = ReleaseStore(root: link.appendingPathComponent("deep"), projectSlug: "demo", cdnBaseURL: base)
+        XCTAssertEqual(linked.folderIdentity, before)
+        XCTAssertEqual(direct.folderIdentity, before)
+
+        try FileManager.default.createDirectory(at: direct.directory, withIntermediateDirectories: true)
+
+        XCTAssertEqual(direct.folderIdentity, before)
+        XCTAssertEqual(linked.folderIdentity, before)
+    }
+
+    /// `https://cdn.example` and `https://cdn.example/` are one CDN: the
+    /// requests are the same, so the saved release is the same one too, and
+    /// so is the run.
+    func testASlashAtTheEndOfTheCDNAddressIsTheSameCDN() async throws {
+        addTeardownBlock { Localize.resetShared() }
+        _ = try await loaded(["en/translation": ["a": "A1"]])
+        var slashed = configuration(policy: .nextLaunch)
+        slashed.cdnBaseURL = URL(string: StubTransport.base + "/")!
+
+        // Saved under one spelling, read under the other, and nothing deleted.
+        let first = Localize.configure(slashed, refresh: false)
+        XCTAssertEqual(first.string("a"), "A1")
+        XCTAssertEqual(savedFiles, ["current.json", "v1.json"])
+
+        // What the run downloads under one spelling waits under the other.
+        stub.setPointer("v2")
+        stub.publish("v2", ["en/translation": ["a": "A2"]])
+        let downloaded = try await first.refresh()
+        XCTAssertEqual(downloaded, .pendingNextLaunch(version: "v2"))
+        XCTAssertEqual(stub.requests.last, "/demo/v2/en/translation.json")
+        let plain = Localize.configure(configuration(policy: .nextLaunch), refresh: false)
+        XCTAssertEqual(plain.string("a"), "A1")
+
+        // And the other way round at the next launch.
+        Localize.resetShared()
+        stub.goOffline()
+        XCTAssertEqual(Localize.configure(configuration(policy: .nextLaunch), refresh: false).string("a"), "A2")
+        XCTAssertEqual(savedFiles, ["current.json", "v2.json"])
+    }
+
+    /// A release an earlier version of the SDK saved with the slash in what
+    /// it wrote down as the CDN is still this CDN's release.
+    func testAReleaseSavedWithASlashAtTheEndOfTheCDNAddressIsRead() async throws {
+        _ = try await loaded(["en/translation": ["a": "A"]])
+        let file = cacheDirectory.appendingPathComponent("demo").appendingPathComponent("v1.json")
+        var body = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        XCTAssertEqual(body["source"] as? String, StubTransport.base)
+        body["source"] = StubTransport.base + "/"
+        try JSONSerialization.data(withJSONObject: body).write(to: file)
+        stub.goOffline()
+
+        XCTAssertEqual(Localize(configuration: configuration()).string("a"), "A")
+        XCTAssertEqual(savedFiles, ["current.json", "v1.json"])
+    }
+
     func testAPinnedVersionThatIsNotPublishedYetIsNotSavedAsEmpty() async throws {
         let localize = Localize(configuration: configuration(fallback: nil, version: "v3"))
         let url = URL(string: "\(StubTransport.base)/demo/v3/en/translation.json")!
@@ -1266,7 +1378,9 @@ final class RefreshTests: LocalizeTestCase {
 
         let result = try await german.refresh()
 
-        XCTAssertEqual(result, .pendingNextLaunch(version: "v2"))
+        // The texts on screen changed, so that is what the result says. The
+        // release that waits is saved all the same, and told of next time.
+        XCTAssertEqual(result, .updated(version: "v1"))
         XCTAssertEqual(german.version, "v1")
         XCTAssertEqual(german.string("a"), "A auf Deutsch")
         let announced = await nextValue(of: updates)
@@ -1293,9 +1407,11 @@ final class RefreshTests: LocalizeTestCase {
 
         let result = try await regional.refresh()
 
-        XCTAssertEqual(result, .pendingNextLaunch(version: "v2"))
+        XCTAssertEqual(result, .updated(version: "v1"))
         XCTAssertEqual(regional.version, "v1")
         XCTAssertEqual(regional.string("a"), "A")
+        let again = try await regional.refresh()
+        XCTAssertEqual(again, .pendingNextLaunch(version: "v2"))
     }
 
     /// A file of the release in use that cannot be fetched leaves that

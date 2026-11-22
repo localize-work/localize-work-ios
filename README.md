@@ -118,7 +118,7 @@ LocalizeConfiguration(
 | `defaultNamespace` | the first of `namespaces` | The namespace of a lookup that names none. |
 | `version` | none (follow the latest) | A release to stay on, such as `"v12"`. The SDK then never reads `latest.json`, and never uses a saved release of another version. |
 | `updatePolicy` | `.immediately` | When a downloaded release starts being used: `.immediately`, or `.nextLaunch`. |
-| `cdnBaseURL` | `https://cdn.localize.work` | Where the files are served from. |
+| `cdnBaseURL` | `https://cdn.localize.work` | Where the files are served from. A slash at the end makes no difference. |
 | `requestTimeout` | 15 seconds | How long a request may wait for data. |
 | `bundle` | `.main` | The bundle whose string tables are the fallback. |
 | `transport` | `URLSessionTransport()` | How requests are made. Replace it in tests. |
@@ -337,11 +337,13 @@ SwiftUI, with the stream of versions:
 
 ```swift
 struct ContentView: View {
+    // The language your app has chosen, wherever you keep it.
+    @AppStorage("language") private var language = "en"
     @State private var release = Localize.shared.version
 
     var body: some View {
         Text(Localize.shared.string("nav.home"))
-            .id(release)
+            .id("\(language) \(release ?? "")")
             .task {
                 for await version in Localize.shared.updates {
                     release = version
@@ -353,6 +355,12 @@ struct ContentView: View {
 
 The loop keeps running when `Localize.configure` is called again: the stream
 then tells of the new instance's releases.
+
+The stream and the notification tell of releases, not of a change of language.
+When the release in use already has the new language, `configure` switches to
+it at once and no release starts being used, so neither says anything. That is
+why the view above also depends on `language`: call `Localize.configure` with
+the new locale first, then change the value your views read.
 
 UIKit, with a notification, posted on the main thread:
 
@@ -373,10 +381,13 @@ try await Localize.shared.refresh()
 
 It returns `.updated`, `.upToDate` or `.pendingNextLaunch`, each with the
 version. `.updated` says that lookups read other strings now, so it is the one
-to redraw on. That is a new release in use, and also the release the run
-started with when this refresh made it usable: it fetched the files it lacked
-for the language, or could read it from the device at last. A refresh that
-finds nothing new costs one small request.
+to redraw on, and its version is the one they read. That is a new release in
+use, and also the release the run started with when this refresh made it
+usable: it fetched the files it lacked for the language, or could read it from
+the device at last. With `.nextLaunch` the same refresh may have saved a newer
+release for the next launch as well; `.updated` does not mention that one, and
+the next refresh returns `.pendingNextLaunch` for it. A refresh that finds
+nothing new costs one small request.
 
 ## Offline behaviour
 
@@ -390,7 +401,11 @@ finds nothing new costs one small request.
   release is another version than the pinned one, the app shows bundled
   strings.
 - A pinned `version` that is not published yet makes `refresh()` fail (HTTP
-  404) and saves nothing, so the release is picked up once it exists.
+  404) and saves nothing, so the release is picked up once it exists. The SDK
+  can tell that only from the files: a pinned release with no file for any of
+  the languages asked for looks the same, and fails the same way at every
+  refresh, while the app shows its bundled strings. Set a `fallbackLocale` the
+  project has, so that a file is always found.
 - When a newer release is saved, older ones are deleted.
 - A saved release that is damaged or half-written is deleted and treated as
   absent. The app shows bundled strings until the next download. Files that
@@ -399,7 +414,8 @@ finds nothing new costs one small request.
   are left alone and read again later.
 - The device holds one release of a project, in its folder under
   `cacheDirectory`. The same folder written another way, through a symbolic
-  link or with `/.` in the path, is the same folder. A configuration pinned to
+  link or with `/.` in the path, is the same folder, before it exists and
+  after. A configuration pinned to
   a `version` shares it with one that follows `latest.json`, so each saves its
   own release over the other's. A refresh asks the device what it holds, and
   saves again what is missing there, also when nothing newer is published.

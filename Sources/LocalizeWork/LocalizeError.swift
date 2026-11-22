@@ -70,11 +70,16 @@ public enum LocalizeRefreshResult: Sendable, Equatable {
     /// The release in use is already the published one, and lookups read
     /// what they read before.
     case upToDate(version: String)
-    /// Lookups read other texts now. A newly downloaded release is in use;
-    /// or the one this run started with is, which lacked files for the
-    /// language or could not be read from the device until now.
+    /// Lookups read other texts now: redraw. A newly downloaded release is
+    /// in use; or the one this run started with is, which lacked files for
+    /// the language or could not be read from the device until now. The
+    /// version is the one lookups read. With
+    /// ``LocalizeUpdatePolicy/nextLaunch`` a newer release may have been
+    /// saved for the next launch by the same refresh; this result does not
+    /// mention it, and the next refresh reports it as `pendingNextLaunch`.
     case updated(version: String)
     /// A newly downloaded release is saved and takes effect at the next
-    /// launch. Only with ``LocalizeUpdatePolicy/nextLaunch``.
+    /// launch, and lookups read what they read before. Only with
+    /// ``LocalizeUpdatePolicy/nextLaunch``.
     case pendingNextLaunch(version: String)
 }

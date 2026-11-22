@@ -456,7 +456,15 @@ public final class Localize: Sendable {
             // (nothing the app has shown changes). Any other version waits
             // for the next launch, and a run that started with no release
             // keeps showing bundled strings.
-            guard let held, held.version == version else { return .pendingNextLaunch(version: version) }
+            guard let held, held.version == version else {
+                // When this refresh also put the release the run started with
+                // in use, that is what the caller hears: the texts on screen
+                // changed. The one that waits is told of by the next refresh.
+                if startedShowing, let reading = state.withLock({ $0.active?.version }) {
+                    return .updated(version: reading)
+                }
+                return .pendingNextLaunch(version: version)
+            }
             let changed = try await use(held.adding(release.files))
             return changed || startedShowing ? .updated(version: version) : .upToDate(version: version)
         }

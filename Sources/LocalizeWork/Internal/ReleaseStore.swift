@@ -11,21 +11,41 @@ struct ReleaseStore: Sendable {
     /// The folder of this project.
     let directory: URL
     let projectSlug: String
-    /// The CDN the release came from. A release cached from another CDN has
-    /// version numbers of its own and is not this project's release.
+    /// The CDN the release came from, as ``ReleaseLoader/base(_:)`` writes
+    /// it. A release cached from another CDN has version numbers of its own
+    /// and is not this project's release.
     let source: String
 
     init(root: URL, projectSlug: String, cdnBaseURL: URL) {
         directory = root.appendingPathComponent(Self.folderName(projectSlug), isDirectory: true)
         self.projectSlug = projectSlug
-        source = cdnBaseURL.absoluteString
+        source = ReleaseLoader.base(cdnBaseURL)
     }
 
     /// One name for the folder, however the configuration wrote its path:
     /// with `/.` in it, through a symbolic link, with or without a slash at
     /// the end. Two configurations with the same one share the saved files.
+    ///
+    /// The name is the same before the folder exists and after: a first
+    /// launch creates it, and is still the same run afterwards. So the part
+    /// of the path that exists is resolved, and the rest is added to it as
+    /// written. (Foundation's own resolving leaves a path alone until all of
+    /// it exists, and then gives another one.)
     var folderIdentity: String {
-        directory.standardizedFileURL.resolvingSymlinksInPath().path
+        var existing = directory.standardizedFileURL
+        var missing: [String] = []
+        while true {
+            if let resolved = realpath(existing.path, nil) {
+                defer { free(resolved) }
+                return missing.reversed().reduce(URL(fileURLWithPath: String(cString: resolved))) {
+                    $0.appendingPathComponent($1)
+                }.path
+            }
+            let parent = existing.deletingLastPathComponent()
+            if parent.path == existing.path || existing.path == "/" { return directory.standardizedFileURL.path }
+            missing.append(existing.lastPathComponent)
+            existing = parent
+        }
     }
 
     /// What the device holds for this project.
@@ -114,7 +134,9 @@ struct ReleaseStore: Sendable {
               let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               body["format"] as? Int == Self.format,
               body["projectSlug"] as? String == projectSlug,
-              body["source"] as? String == source,
+              // The same CDN written another way, with a slash at the end
+              // say, is the same source.
+              (body["source"] as? String).map(ReleaseLoader.base) == source,
               body["version"] as? String == version,
               let entries = body["files"] as? [[String: Any]]
         else { return .damaged }
