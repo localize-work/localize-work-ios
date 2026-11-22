@@ -102,8 +102,9 @@ public final class Localize: Sendable {
         var saved: Release?
         /// The release this run of the app reads: `active`, or the one it
         /// started from that still lacks files for the current language.
-        /// With the next-launch policy it is the only release this run
-        /// shows, so it is the one that missing files are added to.
+        /// A refresh first makes it whole from its own version. With the
+        /// next-launch policy it is the only release this run shows; nil
+        /// then means the run started with none and shows bundled strings.
         var held: Release?
         var refresh: Task<LocalizeRefreshResult, Error>?
         var observers: [UUID: AsyncStream<String>.Continuation] = [:]
@@ -133,16 +134,17 @@ public final class Localize: Sendable {
             configuration.version == nil || release.version == configuration.version
         }
         let saved = store?.load().flatMap { matchesPin($0) ? $0 : nil }
-        // With the next-launch policy a running app keeps the release it
-        // started with. An instance that takes over from another one for the
-        // same project (a change of language) is still the same run of the
-        // app, so it reads that release, not the newer one saved meanwhile.
+        // With the next-launch policy the release a run of the app shows is
+        // decided when the app starts. An instance that takes over from
+        // another one for the same project (a change of language) is still
+        // the same run, so it reads what that one started with, not what was
+        // saved meanwhile. That holds for a run that started with nothing,
+        // too: it keeps showing bundled strings.
         var started = saved
         if configuration.updatePolicy == .nextLaunch,
            let previous, let store, let theirs = previous.store,
-           theirs.directory == store.directory, theirs.source == store.source,
-           let release = previous.state.withLock({ $0.held }), matchesPin(release) {
-            started = release
+           theirs.directory == store.directory, theirs.source == store.source {
+            started = previous.state.withLock({ $0.held }).flatMap { matchesPin($0) ? $0 : nil }
         }
         // A release is used whole or not at all. After a change of language
         // the saved one lacks the new language's files: until they arrive the
@@ -261,6 +263,13 @@ public final class Localize: Sendable {
             transport: configuration.transport,
             timeout: configuration.requestTimeout
         )
+        let needed = Self.neededFiles(localeChain, configuration.namespaces)
+        // First the release this run already reads. After a change of
+        // language it lacks the new language's files; they come from that
+        // same version, whatever is published now and whether or not the
+        // pointer or a newer release can be reached.
+        let completedHeld = await completeHeldRelease(needed, loader)
+
         // The pointer is read once. Every file below comes from the version
         // it named, whatever is published in the meantime.
         let version: String
@@ -270,16 +279,14 @@ public final class Localize: Sendable {
             version = try await loader.latestVersion()
         }
 
-        let needed = Self.neededFiles(localeChain, configuration.namespaces)
-        // Files of a version never change, so the ones already here for this
-        // version are reused and only the rest are downloaded.
-        let (active, saved, held) = state.withLock { ($0.active, $0.saved, $0.held) }
+        // Files of a version never change, so every file already here for
+        // this version is kept, also those of a language the app used
+        // earlier, and only the rest are downloaded.
+        let (saved, held) = state.withLock { ($0.saved, $0.held) }
         var files: [FileKey: [String: Node]] = [:]
-        for known in [saved, active, held] {
+        for known in [saved, held] {
             guard let known, known.version == version else { continue }
-            for file in needed where files[file] == nil {
-                files[file] = known.files[file]
-            }
+            files.merge(known.files) { first, _ in first }
         }
         let heldNothing = files.isEmpty
         let missing = Set(needed).subtracting(files.keys)
@@ -304,14 +311,7 @@ public final class Localize: Sendable {
 
         if saved.map({ $0.hasSameContents(as: release) }) != true {
             do {
-                // An instance that `configure` has replaced must not write
-                // its release over the one its replacement saves.
-                try Self.commitLock.withLock { _ in
-                    if retired.withLock({ $0 }) { throw LocalizeError.replaced }
-                    guard let store else { throw CocoaError(.fileNoSuchFile) }
-                    try store.save(release)
-                }
-                state.withLock { $0.saved = release }
+                try save(release)
             } catch LocalizeError.replaced {
                 throw LocalizeError.replaced
             } catch {
@@ -327,23 +327,46 @@ public final class Localize: Sendable {
 
         switch configuration.updatePolicy {
         case .immediately:
-            return await use(release) ? .updated(version: version) : .upToDate(version: version)
+            let changed = await use(release)
+            return changed || completedHeld ? .updated(version: version) : .upToDate(version: version)
         case .nextLaunch:
-            if let held, held.version == version {
-                // The published release is the one this run started from.
-                // Files it lacked for the current language are added now:
-                // nothing the app has shown from the release changes.
-                let whole = held.adding(release.files)
-                return await use(whole) ? .updated(version: version) : .upToDate(version: version)
-            }
-            // A newer release waits for the next launch. Until then this run
-            // reads the one it started from, made whole from its own version
-            // when a change of language left it without some files.
-            if active == nil, let held, let whole = await completed(held, needed, loader) {
-                _ = await use(whole)
-            }
-            return .pendingNextLaunch(version: version)
+            // The published release is used in this run only when it is the
+            // version the run started with: files of that version are added
+            // (nothing the app has shown changes). Any other version waits
+            // for the next launch, and a run that started with no release
+            // keeps showing bundled strings.
+            guard let held, held.version == version else { return .pendingNextLaunch(version: version) }
+            let changed = await use(held.adding(release.files))
+            return changed || completedHeld ? .updated(version: version) : .upToDate(version: version)
         }
+    }
+
+    /// Saves `release` as the one on the device.
+    private func save(_ release: Release) throws {
+        // An instance that `configure` has replaced must not write its
+        // release over the one its replacement saves.
+        try Self.commitLock.withLock { _ in
+            if retired.withLock({ $0 }) { throw LocalizeError.replaced }
+            guard let store else { throw CocoaError(.fileNoSuchFile) }
+            try store.save(release)
+        }
+        state.withLock { $0.saved = release }
+    }
+
+    /// Makes the release this run reads whole for the current language, from
+    /// its own version, and puts it in use. True when that changed what
+    /// lookups read. Nothing is thrown: when the files cannot be had now, the
+    /// app shows bundled strings and the next refresh tries again.
+    private func completeHeldRelease(_ needed: [FileKey], _ loader: ReleaseLoader) async -> Bool {
+        let (active, held, saved) = state.withLock { ($0.active, $0.held, $0.saved) }
+        guard active == nil, let held, let whole = await completed(held, needed, loader) else { return false }
+        // The copy on the device gets the files too while it is this
+        // version, so the next launch starts whole. A failure only costs
+        // that; the files are in use from memory.
+        if let saved, saved.version == whole.version {
+            try? save(saved.adding(whole.files))
+        }
+        return await use(whole)
     }
 
     /// `release` with the files of `needed` it lacks, fetched from its own

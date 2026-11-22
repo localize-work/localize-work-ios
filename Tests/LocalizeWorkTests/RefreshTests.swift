@@ -493,9 +493,100 @@ final class RefreshTests: LocalizeTestCase {
         let result = try await german.refresh()
 
         XCTAssertEqual(result, .updated(version: "v1"))
-        XCTAssertEqual(Array(stub.requests.dropFirst(before)), ["/demo/latest.json", "/demo/v1/de/translation.json"])
+        // The release already here is completed first, from its own version;
+        // the pointer then confirms it is still the published one.
+        XCTAssertEqual(Array(stub.requests.dropFirst(before)), ["/demo/v1/de/translation.json", "/demo/latest.json"])
         XCTAssertEqual(german.string("a"), "A auf Deutsch")
         XCTAssertEqual(german.string("b"), "B")
+    }
+
+    /// Files of a version are kept for as long as the version is: a language
+    /// the app used earlier is still there, offline, after another was added.
+    func testFilesOfALanguageUsedEarlierAreKeptWhenAnotherLanguageIsAdded() async throws {
+        _ = try await loaded(["en/translation": ["a": "A"], "de/translation": ["a": "A auf Deutsch"]])
+        let german = Localize(configuration: configuration(locale: "de"))
+        let result = try await german.refresh()
+        XCTAssertEqual(result, .updated(version: "v1"))
+        XCTAssertEqual(german.string("a"), "A auf Deutsch")
+
+        stub.goOffline()
+        let english = Localize(configuration: configuration(locale: "en"))
+        XCTAssertEqual(english.version, "v1")
+        XCTAssertEqual(english.string("a"), "A")
+        let germanAgain = Localize(configuration: configuration(locale: "de"))
+        XCTAssertEqual(germanAgain.string("a"), "A auf Deutsch")
+    }
+
+    /// A change of language needs only the release the app already reads.
+    /// While the pointer cannot be read the refresh fails, but the new
+    /// language's texts of that release are shown all the same.
+    func testAChangeOfLanguageDoesNotNeedThePointer() async throws {
+        for policy in [LocalizeUpdatePolicy.immediately, .nextLaunch] {
+            stub = StubTransport()
+            try? FileManager.default.removeItem(at: cacheDirectory)
+            _ = try await loaded(["en/translation": ["a": "A"], "de/translation": ["a": "A auf Deutsch"]])
+            stub.respond(stub.pointerPath, status: 503)
+            let german = Localize(configuration: configuration(locale: "de", fallback: "en", policy: policy))
+            XCTAssertNil(german.version)
+
+            await assertThrows(.http(status: 503, url: URL(string: StubTransport.base + stub.pointerPath)!)) {
+                try await german.refresh()
+            }
+
+            XCTAssertEqual(german.version, "v1", "\(policy)")
+            XCTAssertEqual(german.string("a"), "A auf Deutsch", "\(policy)")
+            // The files reached the device too: the next launch starts whole, offline.
+            stub.goOffline()
+            let next = Localize(configuration: configuration(locale: "de", fallback: "en", policy: policy))
+            XCTAssertEqual(next.string("a"), "A auf Deutsch", "\(policy)")
+        }
+    }
+
+    /// With the next-launch policy a newer release that cannot be downloaded
+    /// is reported, and does not keep the release in use from getting the
+    /// new language's files.
+    func testNextLaunchPolicyCompletesTheReleaseInUseWhenTheNewerOneCannotBeDownloaded() async throws {
+        _ = try await loaded(["en/translation": ["a": "A"]])
+        stub.publish("v1", ["de/translation": ["a": "A auf Deutsch"]])
+        stub.setPointer("v2")
+        stub.publish("v2", ["en/translation": ["a": "A2"]])
+        stub.respond("/demo/v2/de/translation.json", status: 503)
+        let german = Localize(configuration: configuration(locale: "de", fallback: "en", policy: .nextLaunch))
+
+        await assertThrows(.http(status: 503, url: URL(string: StubTransport.base + "/demo/v2/de/translation.json")!)) {
+            try await german.refresh()
+        }
+
+        XCTAssertEqual(german.version, "v1")
+        XCTAssertEqual(german.string("a"), "A auf Deutsch")
+    }
+
+    /// A run that started with no release keeps showing bundled strings, also
+    /// after `configure` is called again: what the run downloaded waits.
+    func testNextLaunchPolicyShowsNothingDownloadedInTheSameRunAfterConfigureIsCalledAgain() async throws {
+        addTeardownBlock { Localize.resetShared() }
+        stub.setPointer("v1")
+        stub.publish("v1", ["en/translation": ["a": "A"], "de/translation": ["a": "A auf Deutsch"]])
+        let first = Localize.configure(configuration(locale: "en", policy: .nextLaunch), refresh: false)
+        let downloaded = try await first.refresh()
+        XCTAssertEqual(downloaded, .pendingNextLaunch(version: "v1"))
+        XCTAssertNil(first.version)
+
+        // The same language again, and another one: still the first run.
+        for locale in ["en", "de"] {
+            let again = Localize.configure(configuration(locale: locale, policy: .nextLaunch), refresh: false)
+            XCTAssertNil(again.version, locale)
+            XCTAssertEqual(again.string("a", fallback: "bundled"), "bundled", locale)
+            let result = try await again.refresh()
+            XCTAssertEqual(result, .pendingNextLaunch(version: "v1"), locale)
+            XCTAssertNil(again.version, locale)
+            XCTAssertEqual(again.string("a", fallback: "bundled"), "bundled", locale)
+        }
+
+        // The next launch reads it.
+        Localize.resetShared()
+        let relaunched = Localize.configure(configuration(locale: "de", policy: .nextLaunch), refresh: false)
+        XCTAssertEqual(relaunched.string("a"), "A auf Deutsch")
     }
 
     func testASavedReleaseWithoutTheNewLanguageStaysUnusedWhenTheDownloadFails() async throws {

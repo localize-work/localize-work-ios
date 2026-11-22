@@ -151,7 +151,10 @@ over the new one.
 A release is used whole or not at all. When the language has changed since the
 release on the device was saved, that release has no files for the new
 language, so the app shows its bundled strings until the files have been
-downloaded.
+downloaded. They are fetched from that same release first, so the change of
+language works even while the newest release cannot be reached. Files already
+downloaded for a release are kept with it: going back to a language the app
+used before needs no download.
 
 ### Applying updates
 
@@ -160,12 +163,22 @@ change while the app is open. With `.nextLaunch` the download is saved and used
 from the next launch, and nothing changes under a running app. On the very
 first launch that means bundled strings until the second launch.
 
-A change of language does not end the run. With `.nextLaunch`, the app keeps
-the release it started with, also after `Localize.configure` is called again
-for another language, and a newer release that was downloaded meanwhile keeps
-waiting. Files that release lacks for the new language are fetched from that
-same release and added to it, since no text the app already shows from it
-changes. When it has no files for the new language at all, the app shows its
+A change of language does not end the run, and by itself never changes which
+release the app shows:
+
+1. The release a run shows is decided when the app starts: the saved release
+   if it is whole for the language, otherwise none. With `.nextLaunch` it
+   changes only at the next launch, also after `Localize.configure` is called
+   again. A run that started with no release shows bundled strings to its end.
+2. After a change of language, the files that release lacks for the new
+   language are fetched from that same release and added to it, since no text
+   the app already shows from it changes. This needs neither the newest
+   release nor `latest.json` to be reachable.
+3. A newer release is handled as always: with `.nextLaunch` it waits for the
+   next launch, with `.immediately` it is used once it is complete. If it
+   cannot be downloaded, `refresh()` throws, and step 2 still holds.
+
+When the release has no files for the new language at all, the app shows its
 bundled strings until the next launch. A regional locale such as `en-FI` needs
 no file of its own for this: the release's `en` texts are enough.
 
