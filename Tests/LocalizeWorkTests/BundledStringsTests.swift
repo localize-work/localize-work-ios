@@ -24,11 +24,18 @@ final class BundledStringsTests: LocalizeTestCase {
 
     /// A bundle with several localizations, each holding its own tables.
     private func makeBundle(
-        localizations: [String: (strings: [String: [String: String]], plurals: [String: [String: Any]])]
+        localizations: [String: (strings: [String: [String: String]], plurals: [String: [String: Any]])],
+        developmentRegion: String? = nil
     ) throws -> Bundle {
         let bundleDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("LocalizeWorkBundle-\(UUID().uuidString).bundle", isDirectory: true)
         bundleDirectories.append(bundleDirectory)
+        try FileManager.default.createDirectory(at: bundleDirectory, withIntermediateDirectories: true)
+        if let developmentRegion {
+            try PropertyListSerialization
+                .data(fromPropertyList: ["CFBundleDevelopmentRegion": developmentRegion], format: .xml, options: 0)
+                .write(to: bundleDirectory.appendingPathComponent("Info.plist"))
+        }
         for (localization, tables) in localizations {
             let lproj = bundleDirectory.appendingPathComponent("\(localization).lproj", isDirectory: true)
             try FileManager.default.createDirectory(at: lproj, withIntermediateDirectories: true)
@@ -353,6 +360,13 @@ final class BundledStringsTests: LocalizeTestCase {
         XCTAssertEqual(try names(["zh-Hans", "en"], "zh-TW"), [])
         XCTAssertEqual(try names(["zh-Hant", "en"], "zh-HK"), ["zh-Hant"])
         XCTAssertEqual(try names(["sr-Latn", "en"], "sr"), [])
+        // Also when the script is not named, and the bundle has nothing else
+        // for the system to answer with.
+        XCTAssertEqual(try names(["zh-Hans"], "zh-TW"), [])
+        XCTAssertEqual(try names(["zh-CN"], "zh-Hant"), [])
+        XCTAssertEqual(try names(["zh-TW"], "zh-Hant"), ["zh-TW"])
+        XCTAssertEqual(try names(["sr-Latn"], "sr"), [])
+        XCTAssertEqual(try names(["fr"], "es"), [])
         // Old and new spellings of one language.
         XCTAssertEqual(try names(["he", "en"], "iw"), ["he"])
         XCTAssertEqual(try names(["nb", "en"], "no"), ["nb"])
@@ -368,6 +382,40 @@ final class BundledStringsTests: LocalizeTestCase {
         let localize = Localize(configuration: configuration(locale: "en-GB", bundle: bundle))
         XCTAssertEqual(localize.string("colour"), "Colour")
         XCTAssertEqual(localize.string("title"), "Title")
+    }
+
+    /// The namespace's table is read in every localization of the language
+    /// before the default table of any.
+    func testARegionsDefaultTableDoesNotAnswerForTheNamespacesTable() throws {
+        let bundle = try makeBundle(localizations: [
+            "en-GB": (["Localizable": ["title": "Default title (GB)", "default.only": "Default only (GB)"]], [:]),
+            "en": (["checkout": ["title": "Checkout title"], "Localizable": ["title": "Default title"]], [:]),
+        ])
+        let localize = Localize(
+            configuration: configuration(locale: "en-GB", namespaces: ["checkout"], bundle: bundle)
+        )
+        XCTAssertEqual(localize.string("title"), "Checkout title")
+        XCTAssertEqual(localize.string("default.only"), "Default only (GB)")
+    }
+
+    /// `Base.lproj` holds strings in the app's development language.
+    func testStringsInTheBaseFolderAreInTheDevelopmentLanguage() async throws {
+        let bundle = try makeBundle(
+            localizations: [
+                "Base": (["Localizable": ["title": "Заголовок"]], [:]),
+                "en": (["Localizable": ["title": "Title (bundled)"]], [:]),
+            ],
+            developmentRegion: "ru"
+        )
+        XCTAssertEqual(BundledStrings.localizations(of: bundle, for: "ru").map(\.name), ["ru"])
+        XCTAssertEqual(BundledStrings.localizations(of: bundle, for: "uk").map(\.name), [])
+        let localize = try await loaded(
+            ["ru/translation": [:], "en/translation": ["title": "Title"]],
+            locale: "ru",
+            fallback: "en",
+            bundle: bundle
+        )
+        XCTAssertEqual(localize.string("title"), "Заголовок")
     }
 
     /// A bundled plural in the user's language counts by that language's

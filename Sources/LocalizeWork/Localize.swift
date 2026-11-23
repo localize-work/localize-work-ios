@@ -313,16 +313,14 @@ public final class Localize: Sendable {
         if let release, let text = Self.text(in: release, own, key: key, count: count, namespace: namespace) {
             return Interpolation.apply(text, resolve: resolve)
         }
-        for localization in ownBundled {
-            if let bundled = BundledStrings.string(
-                key: key,
-                namespace: namespace,
-                in: localization,
-                arguments: arguments,
-                count: count
-            ) {
-                return bundled
-            }
+        if let bundled = BundledStrings.string(
+            key: key,
+            namespace: namespace,
+            in: ownBundled,
+            arguments: arguments,
+            count: count
+        ) {
+            return bundled
         }
         let others = localeChain.dropFirst(ownLocales)
         if let release, let text = Self.text(in: release, others, key: key, count: count, namespace: namespace) {
