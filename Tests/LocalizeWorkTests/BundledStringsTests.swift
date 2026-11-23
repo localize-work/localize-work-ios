@@ -381,6 +381,25 @@ final class BundledStringsTests: LocalizeTestCase {
         XCTAssertEqual(try names(["no", "en"], "nb"), ["no"])
     }
 
+    /// Before iOS 16 the system does not say which script a locale is
+    /// written in when the code does not name it. A script named on one side
+    /// only is then not known to be the other side's.
+    func testAScriptThatCannotBeToldIsNotTakenForTheSame() throws {
+        func names(_ localizations: [String], _ locale: String) throws -> [String] {
+            let bundle = try makeBundle(tables: Dictionary(uniqueKeysWithValues: localizations.map { ($0, ["a": "A"]) }))
+            return BundledStrings.localizations(of: bundle, for: locale, systemScripts: false).map(\.name)
+        }
+        XCTAssertEqual(try names(["sr-Latn", "en"], "sr"), [])
+        XCTAssertEqual(try names(["sr", "en"], "sr-Latn"), [])
+        XCTAssertEqual(try names(["sr-Latn", "sr-Cyrl"], "sr-Latn-RS"), ["sr-Latn"])
+        XCTAssertEqual(try names(["en", "et"], "et-EE"), ["et"])
+        XCTAssertEqual(try names(["en", "en-GB"], "en-FI"), ["en-GB", "en"])
+        // Chinese regions are known everywhere.
+        XCTAssertEqual(try names(["zh-Hans"], "zh-TW"), [])
+        XCTAssertEqual(try names(["zh-Hant", "en"], "zh-HK"), ["zh-Hant"])
+        XCTAssertEqual(try names(["zh-CN"], "zh-Hans"), ["zh-CN"])
+    }
+
     /// A region's table usually holds only what differs from the language's.
     func testARegionalTableInheritsFromTheLanguagesTable() throws {
         let bundle = try makeBundle(tables: [

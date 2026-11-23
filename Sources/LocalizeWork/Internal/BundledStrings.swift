@@ -19,23 +19,27 @@ enum BundledStrings {
     /// system's, as for a device set to `locale`: `en-FI` reads `en-GB`, then
     /// `en`. A localization in another language, which the system would fall
     /// back to, is not among them.
-    static func localizations(of bundle: Bundle, for locale: String) -> [Localization] {
+    ///
+    /// - Parameter systemScripts: False to tell scripts as a system does
+    ///   that cannot say which one a locale is written in.
+    static func localizations(of bundle: Bundle, for locale: String, systemScripts: Bool = true) -> [Localization] {
         // `Base.lproj` holds strings too, in the development language.
         let development = bundle.developmentLocalization
         let base = folder("Base", in: bundle)
         var names = bundle.localizations.filter { $0 != "Base" }
         if base != nil, let development, !names.contains(development) { names.append(development) }
-        let wanted = subtags(of: locale)
+        let wanted = subtags(of: locale, systemScripts: systemScripts)
         // The system ranks the bundle's localizations as a whole, and may
         // answer with one the user cannot read while a readable one is there:
         // `sr-ME`, in Latin letters, for `sr-RS`, ahead of `sr-Cyrl-ME`. So
         // it is only given those in the language, written the same way. Two
-        // ways of writing a language are two languages to a reader.
+        // ways of writing a language are two languages to a reader. Where
+        // the script of one side is named and that of the other cannot be
+        // told, they are not known to be the same, and the localization is
+        // left to the later lookup.
         let readable = names.filter { name in
-            let found = subtags(of: name)
-            guard found.language == wanted.language else { return false }
-            if let written = found.script, let asked = wanted.script, written != asked { return false }
-            return true
+            let found = subtags(of: name, systemScripts: systemScripts)
+            return found.language == wanted.language && found.script == wanted.script
         }
         // With nothing to choose from, the system still answers.
         guard !readable.isEmpty else { return [] }
@@ -237,7 +241,7 @@ enum BundledStrings {
     /// or not: `zh` and `Hant` of `zh-Hant-TW` and of `zh-TW`. A style of a
     /// script is given as that script. The script is nil when it cannot be
     /// told.
-    private static func subtags(of code: String) -> (language: String, script: String?) {
+    private static func subtags(of code: String, systemScripts: Bool) -> (language: String, script: String?) {
         let canonical = LocaleCode.canonical(code)
         let parts = canonical.split(separator: "-").map(String.init)
         // Norwegian is written `no` by some and `nb` by others.
@@ -245,7 +249,7 @@ enum BundledStrings {
         if parts.count > 1, parts[1].count == 4, parts[1].allSatisfy(\.isLetter) {
             return (language, styles[parts[1]] ?? parts[1])
         }
-        if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, *) {
+        if systemScripts, #available(iOS 16, macOS 13, tvOS 16, watchOS 9, *) {
             let script = Locale.Language(identifier: canonical).script?.identifier
             return (language, script.map { styles[$0] ?? $0 })
         }

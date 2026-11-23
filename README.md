@@ -328,6 +328,12 @@ script (`zh-Hans` for `zh-Hant`) does not count. The second time, after the
 release's fallback language, it asks the way any app does, and gets the
 language iOS picks for your app.
 
+Before iOS 16 the system does not say which script a code such as `sr` or
+`sr-ME` stands for; the SDK knows it for Chinese regions only. There a
+localization counts when both codes name the same script or neither names one:
+`sr-Latn` is not read for `sr`, and two codes that name none are taken to be
+written alike.
+
 The catalog writes placeholders as format specifiers, which have positions
 instead of names. The SDK fills them like this:
 
