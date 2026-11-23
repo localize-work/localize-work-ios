@@ -120,7 +120,7 @@ LocalizeConfiguration(
 | `updatePolicy` | `.immediately` | When a downloaded release starts being used: `.immediately`, or `.nextLaunch`. |
 | `cdnBaseURL` | `https://cdn.localize.work` | Where the files are served from. A slash at the end makes no difference. |
 | `requestTimeout` | 15 seconds | How long a request may wait for data. |
-| `bundle` | `.main` | The bundle whose string tables are the fallback. |
+| `bundle` | `.main` | The bundle whose string tables supply a string the release lacks. |
 | `transport` | `URLSessionTransport()` | How requests are made. Replace it in tests. |
 | `cacheDirectory` | a folder in Application Support | Where releases are saved. |
 
@@ -202,15 +202,17 @@ A release may have no file at all for the new language. What happens then
 depends on whether the release is known to be the published one:
 
 - Once `latest.json` has named that release, it is read like any other: a file
-  it does not have counts as empty, and the strings come from the fallback
-  locale. A launch in that language reads the same. A pinned `version` names
-  the release in the same way, and `latest.json` is not read at all.
+  it does not have counts as empty, and each string comes from the next place
+  it is looked up in, the app's bundled string in that language and then the
+  fallback locale (see [Where a string comes from](#where-a-string-comes-from)).
+  A launch in that language reads the same. A pinned `version` names the
+  release in the same way, and `latest.json` is not read at all.
 - Until then the app shows its bundled strings. That is while `latest.json`
   cannot be read, and with `.nextLaunch` also while it names a newer release,
   which waits for the next launch. A release that answers "not found" for every
-  file of a language may also be one the CDN no longer keeps, and the bundled
-  strings are in the user's language. A file of the fallback locale does not
-  count as an answer here: it says nothing about the new language.
+  file of a language may also be one the CDN no longer keeps, so that answer
+  alone does not put it in use. A file of the fallback locale does not count as
+  an answer here: it says nothing about the new language.
 
 In that second case one thing decides whether the release has the language: a
 file of the locale, or of a shorter form of it, was found, or the release
@@ -266,7 +268,8 @@ For a count the SDK tries, in each locale's file in turn, as i18next does:
 
 A file that has none of them leaves the key to the next locale. So a regional
 locale that overrides only `items_other` still gets `items_one` from its base
-language. Only when no locale has the form or the plain key is a locale's
+language. Only when no locale has the form or the plain key, and the app has
+no bundled string for the key in the user's language, is a locale's
 `items_other` used, as a last resort.
 
 The form is chosen by the language of the file being read. If the Russian file
@@ -289,13 +292,21 @@ localize.string("inbox", ["name": "Ann"], count: 2)        // "{{name}} has {{co
 
 To build the values at run time, use `LocalizeArguments([("name", name)])`.
 
-### When nothing has the key
+### Where a string comes from
 
-In order:
+The user's language comes first, wherever the text is. In order:
 
-1. the string bundled in your app (see below);
-2. the `fallback:` you passed;
-3. the key itself.
+1. the release, in `locale` and its shorter forms (`en-FI`, then `en`);
+2. the string bundled in your app, when the app has that language (see below);
+3. the release, in `fallbackLocale` and its shorter forms;
+4. the string bundled in your app, in whatever language iOS picks for it;
+5. the `fallback:` you passed;
+6. the key itself.
+
+So a user whose language the release lacks a text in sees the text your app
+shipped with in their language, not a newer one in the fallback language. If
+the app does not bundle their language, step 2 finds nothing and the fallback
+language of the release is shown.
 
 ## Bundled strings
 
@@ -304,9 +315,18 @@ is offline have text to show. Export an **Xcode String Catalog** from
 localize.work and add the `.xcstrings` files to your app target: there is one
 file per namespace, named after it.
 
-When the release has no text for a key, the SDK asks the bundle for the same
-key, first in the table named after the namespace, then in the default table
-(`Localizable`).
+When the release has no text for a key in the user's language, the SDK asks
+the bundle for the same key, first in the table named after the namespace, then
+in the default table (`Localizable`).
+
+It asks twice. First for the string in the language of `locale`, straight from
+that localization of the bundle, whatever language the device is set to. Which
+localization counts is what iOS would choose for a device set to `locale`:
+`en-FI` reads `en-GB`, then `en`, and `pt-PT` reads `pt-BR` when that is the
+only Portuguese the app has. A localization in another language or another
+script (`zh-Hans` for `zh-Hant`) does not count. The second time, after the
+release's fallback language, it asks the way any app does, and gets the
+language iOS picks for your app.
 
 The catalog writes placeholders as format specifiers, which have positions
 instead of names. The SDK fills them like this:
@@ -325,8 +345,6 @@ filled like a published one.
 The plural form of a bundled string follows the language the string is written
 in, and where a region counts differently, the region it is written for: a
 `pt-PT` table counts as European Portuguese does on a device set to Brazil.
-Bundled strings come in the language iOS picks for your app, which can differ
-from `locale` if you set that yourself.
 
 ## Updating the screen when a release arrives
 

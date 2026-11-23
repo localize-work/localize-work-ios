@@ -19,20 +19,34 @@ final class BundledStringsTests: LocalizeTestCase {
         plurals: [String: [String: Any]] = [:],
         localization: String = "en"
     ) throws -> Bundle {
+        try makeBundle(localizations: [localization: (strings, plurals)])
+    }
+
+    /// A bundle with several localizations, each holding its own tables.
+    private func makeBundle(
+        localizations: [String: (strings: [String: [String: String]], plurals: [String: [String: Any]])]
+    ) throws -> Bundle {
         let bundleDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("LocalizeWorkBundle-\(UUID().uuidString).bundle", isDirectory: true)
         bundleDirectories.append(bundleDirectory)
-        let lproj = bundleDirectory.appendingPathComponent("\(localization).lproj", isDirectory: true)
-        try FileManager.default.createDirectory(at: lproj, withIntermediateDirectories: true)
-        for (table, entries) in strings {
-            try PropertyListSerialization.data(fromPropertyList: entries, format: .xml, options: 0)
-                .write(to: lproj.appendingPathComponent("\(table).strings"))
-        }
-        for (table, entries) in plurals {
-            try PropertyListSerialization.data(fromPropertyList: entries, format: .xml, options: 0)
-                .write(to: lproj.appendingPathComponent("\(table).stringsdict"))
+        for (localization, tables) in localizations {
+            let lproj = bundleDirectory.appendingPathComponent("\(localization).lproj", isDirectory: true)
+            try FileManager.default.createDirectory(at: lproj, withIntermediateDirectories: true)
+            for (table, entries) in tables.strings {
+                try PropertyListSerialization.data(fromPropertyList: entries, format: .xml, options: 0)
+                    .write(to: lproj.appendingPathComponent("\(table).strings"))
+            }
+            for (table, entries) in tables.plurals {
+                try PropertyListSerialization.data(fromPropertyList: entries, format: .xml, options: 0)
+                    .write(to: lproj.appendingPathComponent("\(table).stringsdict"))
+            }
         }
         return try XCTUnwrap(Bundle(url: bundleDirectory))
+    }
+
+    /// A bundle whose localizations each hold the same one table of strings.
+    private func makeBundle(tables: [String: [String: String]]) throws -> Bundle {
+        try makeBundle(localizations: tables.mapValues { (["Localizable": $0], [:]) })
     }
 
     /// A plural entry as Xcode compiles a catalog's plural variations.
@@ -268,6 +282,135 @@ final class BundledStringsTests: LocalizeTestCase {
         let finland = Locale(identifier: "en_FI")
         XCTAssertEqual(BundledStrings.formatLocale(of: british, device: finland), finland)
         XCTAssertEqual(BundledStrings.formatLocale(of: british, device: brazil).identifier, "en-GB")
+    }
+
+    // MARK: The user's language first
+
+    /// A text the app shipped with in the user's language is shown before
+    /// the release's text in the fallback language.
+    func testABundledStringInTheUsersLanguageWinsOverTheReleasesFallbackLanguage() async throws {
+        let bundle = try makeBundle(tables: [
+            "et": ["title": "Pealkiri (bundled)", "both": "bundled et"],
+            "en": ["title": "Title (bundled)", "both": "bundled en"],
+        ])
+        let localize = try await loaded(
+            [
+                "et/translation": ["both": "published et"],
+                "en/translation": ["title": "Title", "both": "published en", "english.only": "English only"],
+            ],
+            locale: "et",
+            fallback: "en",
+            bundle: bundle
+        )
+        XCTAssertEqual(localize.string("title"), "Pealkiri (bundled)")
+        // The release still wins where it has the key in the user's language.
+        XCTAssertEqual(localize.string("both"), "published et")
+        // A key nobody has in the user's language comes from the fallback one.
+        XCTAssertEqual(localize.string("english.only"), "English only")
+    }
+
+    /// A bundle without the user's language does not come before the
+    /// release: its strings are in another language, and the release's are
+    /// the newer ones.
+    func testABundledStringInAnotherLanguageStaysBehindTheRelease() async throws {
+        let bundle = try makeBundle(tables: ["en": ["title": "Title (bundled)", "bundled.only": "Bundled only"]])
+        let localize = try await loaded(
+            ["et/translation": [:], "en/translation": ["title": "Title"]],
+            locale: "et",
+            fallback: "en",
+            bundle: bundle
+        )
+        XCTAssertEqual(localize.string("title"), "Title")
+        XCTAssertEqual(localize.string("bundled.only"), "Bundled only")
+    }
+
+    /// The user's language is the one the app asked for, whatever language
+    /// iOS reads the bundle in.
+    func testBundledStringsAreReadInTheLocaleAskedFor() throws {
+        let bundle = try makeBundle(tables: [
+            "fi": ["title": "Otsikko"],
+            "ja": ["title": "タイトル"],
+        ])
+        for (locale, expected) in [("fi", "Otsikko"), ("ja", "タイトル"), ("fi-FI", "Otsikko")] {
+            let localize = Localize(configuration: configuration(locale: locale, bundle: bundle))
+            XCTAssertEqual(localize.string("title"), expected, locale)
+        }
+    }
+
+    func testWhichLocalizationsAreInTheUsersLanguage() throws {
+        func names(_ localizations: [String], _ locale: String) throws -> [String] {
+            let bundle = try makeBundle(tables: Dictionary(uniqueKeysWithValues: localizations.map { ($0, ["a": "A"]) }))
+            return BundledStrings.localizations(of: bundle, for: locale).map(\.name)
+        }
+        XCTAssertEqual(try names(["en", "et"], "et"), ["et"])
+        XCTAssertEqual(try names(["en", "et"], "et-EE"), ["et"])
+        XCTAssertEqual(try names(["en"], "et"), [])
+        // A regional locale reads the region's table, then the language's.
+        XCTAssertEqual(try names(["en", "en-GB"], "en-FI"), ["en-GB", "en"])
+        XCTAssertEqual(try names(["pt-BR", "en"], "pt-PT"), ["pt-BR"])
+        // Another script is another language to a reader.
+        XCTAssertEqual(try names(["zh-Hans", "en"], "zh-Hant"), [])
+        XCTAssertEqual(try names(["zh-Hans", "en"], "zh-TW"), [])
+        XCTAssertEqual(try names(["zh-Hant", "en"], "zh-HK"), ["zh-Hant"])
+        XCTAssertEqual(try names(["sr-Latn", "en"], "sr"), [])
+        // Old and new spellings of one language.
+        XCTAssertEqual(try names(["he", "en"], "iw"), ["he"])
+        XCTAssertEqual(try names(["nb", "en"], "no"), ["nb"])
+        XCTAssertEqual(try names(["no", "en"], "nb"), ["no"])
+    }
+
+    /// A region's table usually holds only what differs from the language's.
+    func testARegionalTableInheritsFromTheLanguagesTable() throws {
+        let bundle = try makeBundle(tables: [
+            "en-GB": ["colour": "Colour"],
+            "en": ["colour": "Color", "title": "Title"],
+        ])
+        let localize = Localize(configuration: configuration(locale: "en-GB", bundle: bundle))
+        XCTAssertEqual(localize.string("colour"), "Colour")
+        XCTAssertEqual(localize.string("title"), "Title")
+    }
+
+    /// A bundled plural in the user's language counts by that language's
+    /// rule, and comes before the fallback language's published forms.
+    func testABundledPluralInTheUsersLanguageWinsOverTheReleasesFallbackLanguage() async throws {
+        let bundle = try makeBundle(localizations: [
+            "ru": ([:], ["Localizable": [
+                "items": plural("%#@value@", "value", [
+                    "one": "%lld предмет",
+                    "few": "%lld предмета",
+                    "many": "%lld предметов",
+                    "other": "%lld предмета",
+                ]),
+            ]]),
+            "en": (["Localizable": ["plain": "Plain"]], [:]),
+        ])
+        let localize = try await loaded(
+            [
+                "ru/translation": [:],
+                "en/translation": ["items_one": "{{count}} item", "items_other": "{{count}} items"],
+            ],
+            locale: "ru",
+            fallback: "en",
+            bundle: bundle
+        )
+        XCTAssertEqual(localize.string("items", count: 1), "1 предмет")
+        XCTAssertEqual(localize.string("items", count: 3), "3 предмета")
+        XCTAssertEqual(localize.string("items", count: 5), "5 предметов")
+    }
+
+    /// The release's general form stands in for a missing one only as a last
+    /// resort. A bundled string in the user's language that has the right
+    /// form is not that far down.
+    func testABundledPluralInTheUsersLanguageWinsOverTheReleasesGeneralForm() async throws {
+        let bundle = try makeBundle(
+            strings: [:],
+            plurals: ["Localizable": [
+                "items": plural("%#@value@", "value", ["one": "%lld item", "other": "%lld items"]),
+            ]]
+        )
+        let localize = try await localize(bundle, release: ["items_other": "{{count}} published items"])
+        XCTAssertEqual(localize.string("items", count: 1), "1 item")
+        XCTAssertEqual(localize.string("items", count: 6), "6 published items")
     }
 
     func testAPublishedPluralWinsOverTheBundledOne() async throws {

@@ -39,6 +39,9 @@ enum LocaleCode {
     /// The locales a string is looked up in, most specific first: the locale
     /// and each shorter form of it, then the fallback locale and its shorter
     /// forms, each once. `en-FI` with fallback `et` gives `en-FI`, `en`, `et`.
+    ///
+    /// The chain begins with the locale's own forms, `chain(locale:fallback:)`
+    /// with no fallback: the texts in the user's language.
     static func chain(locale: String, fallback: String?) -> [String] {
         var chain: [String] = []
         func addWithParents(_ code: String) {

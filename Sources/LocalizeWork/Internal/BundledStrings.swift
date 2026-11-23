@@ -3,9 +3,38 @@ import Foundation
 /// The strings shipped inside the app, used when the release has no text for
 /// a key.
 enum BundledStrings {
-    /// The bundled string for `key`, with the values filled in, or nil when
-    /// the bundle has none. The table named after the namespace is tried
-    /// first, then the default table (`Localizable`).
+    /// The tables of a bundle that are written in one language.
+    struct Localization: @unchecked Sendable {
+        /// The localization's folder, opened as a bundle of its own: a lookup
+        /// in it reads these tables and no other language's.
+        let tables: Bundle
+        /// Its name in the app bundle, such as `pt-BR`.
+        let name: String
+    }
+
+    /// The localizations of `bundle` in the language of `locale`, in the
+    /// order to read them; none when the bundle does not have the language.
+    /// The choice is the system's, as for a device set to `locale`: `en-FI`
+    /// reads `en-GB`, then `en`. A localization in another language, which
+    /// the system would fall back to, is not among them.
+    static func localizations(of bundle: Bundle, for locale: String) -> [Localization] {
+        let names = bundle.localizations.filter { $0 != "Base" }
+        let wanted = subtags(of: locale)
+        return Bundle.preferredLocalizations(from: names, forPreferences: [locale]).compactMap { name in
+            let found = subtags(of: name)
+            guard found.language == wanted.language else { return nil }
+            // Two ways of writing a language are two languages to a reader.
+            if let written = found.script, let asked = wanted.script, written != asked { return nil }
+            guard let folder = bundle.url(forResource: name, withExtension: "lproj"),
+                  let tables = Bundle(url: folder)
+            else { return nil }
+            return Localization(tables: tables, name: name)
+        }
+    }
+
+    /// The string for `key` that iOS picks for the app, with the values
+    /// filled in, or nil when the bundle has none. The table named after the
+    /// namespace is tried first, then the default table (`Localizable`).
     static func string(
         key: String,
         namespace: String,
@@ -14,11 +43,44 @@ enum BundledStrings {
         count: Int?,
         device: Locale = .current
     ) -> String? {
+        string(
+            key: key, namespace: namespace, tables: bundle, written: picked(of: bundle),
+            arguments: arguments, count: count, device: device
+        )
+    }
+
+    /// The string for `key` in one localization, or nil when its tables have
+    /// none.
+    static func string(
+        key: String,
+        namespace: String,
+        in localization: Localization,
+        arguments: LocalizeArguments,
+        count: Int?,
+        device: Locale = .current
+    ) -> String? {
+        string(
+            key: key, namespace: namespace, tables: localization.tables, written: localization.name,
+            arguments: arguments, count: count, device: device
+        )
+    }
+
+    /// - Parameter written: The localization the strings of `tables` are
+    ///   written in.
+    private static func string(
+        key: String,
+        namespace: String,
+        tables: Bundle,
+        written: String,
+        arguments: LocalizeArguments,
+        count: Int?,
+        device: Locale
+    ) -> String? {
         guard !key.isEmpty else { return nil }
         for table in [namespace, nil] {
-            let found = bundle.localizedString(forKey: key, value: missing, table: table)
+            let found = tables.localizedString(forKey: key, value: missing, table: table)
             if found != missing {
-                return fill(found, arguments: arguments, count: count, locale: formatLocale(of: bundle, device: device))
+                return fill(found, arguments: arguments, count: count, locale: formatLocale(written: written, device: device))
             }
         }
         return nil
@@ -79,13 +141,23 @@ enum BundledStrings {
         return String(format: format, locale: locale, arguments: values)
     }
 
-    /// The locale to format a string of `bundle` with. Foundation picks the
-    /// plural form by this locale, so it has to be the language the string
-    /// is written in, which is not the device's when the app has no
-    /// localization for the device's language.
+    /// The localization iOS reads the strings of `bundle` from.
+    private static func picked(of bundle: Bundle) -> String {
+        let localization = bundle.preferredLocalizations.first ?? "en"
+        return localization == "Base" ? bundle.developmentLocalization ?? "en" : localization
+    }
+
+    /// The locale to format a string of `bundle` with, as iOS picks it.
     static func formatLocale(of bundle: Bundle, device: Locale = .current) -> Locale {
-        var localization = bundle.preferredLocalizations.first ?? "en"
-        if localization == "Base" { localization = bundle.developmentLocalization ?? "en" }
+        formatLocale(written: picked(of: bundle), device: device)
+    }
+
+    /// The locale to format a string with that is written in the
+    /// localization `written`. Foundation picks the plural form by this
+    /// locale, so it has to be the language the string is written in, which
+    /// is not the device's when the string comes from another language's
+    /// table.
+    static func formatLocale(written localization: String, device: Locale = .current) -> Locale {
         let written = Locale(identifier: localization)
         guard language(of: written) == language(of: device) else { return written }
         // The same language can count differently by region: zero is
@@ -107,6 +179,17 @@ enum BundledStrings {
     private static func language(of locale: Locale) -> String {
         let code = locale.identifier.split(whereSeparator: { "_-@".contains($0) }).first ?? ""
         return code.lowercased()
+    }
+
+    /// The language of a locale code and, when the code names one, the
+    /// script: `zh` and `Hant` of `zh-Hant-TW`.
+    private static func subtags(of code: String) -> (language: String, script: String?) {
+        let parts = LocaleCode.canonical(code).split(separator: "-")
+        // Norwegian is written `no` by some and `nb` by others.
+        let language = parts.first.map { $0 == "no" ? "nb" : String($0) } ?? ""
+        let second = parts.dropFirst().first.map(String.init)
+        let script = second.flatMap { $0.count == 4 && $0.allSatisfy(\.isLetter) ? $0 : nil }
+        return (language, script)
     }
 
     private static func integer(_ value: Any?) -> Int64 {

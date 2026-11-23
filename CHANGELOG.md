@@ -30,6 +30,8 @@ The first release.
   does, by CLDR 47 cardinal rules for whole numbers; `{{name}}` placeholders.
 - Fallback to the app's bundled strings, with the values filled into format
   specifiers and the plural form chosen from a string catalog's variations.
+- The user's language first: a bundled string in the language of `locale` is
+  shown before the release's text in the fallback locale.
 - `updates` (an `AsyncStream`) and `Localize.didUpdateNotification`, sent when
   a downloaded release starts being used. A stream of `Localize.shared` goes on
   when `configure` is called again.

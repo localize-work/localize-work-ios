@@ -129,6 +129,12 @@ public final class Localize: Sendable {
 
     /// The locales a string is looked up in, most specific first.
     private let localeChain: [String]
+    /// How many of `localeChain`, from its start, are the locale and its
+    /// shorter forms. The rest are the fallback locale's.
+    private let ownLocales: Int
+    /// The app's bundled strings in the language of the locale, in the order
+    /// to read them. Empty when the bundle does not have that language.
+    private let ownBundled: [BundledStrings.Localization]
     private let store: ReleaseStore?
     /// The entry of ``runs`` this instance keeps up to date; nil for an
     /// instance of the app's own, which is a run by itself.
@@ -194,6 +200,8 @@ public final class Localize: Sendable {
     ) {
         self.configuration = configuration
         localeChain = configuration.localeChain
+        ownLocales = LocaleCode.chain(locale: configuration.locale, fallback: nil).count
+        ownBundled = BundledStrings.localizations(of: configuration.bundle, for: configuration.locale)
         self.store = store
         self.run = run
         var unread = false
@@ -271,9 +279,11 @@ public final class Localize: Sendable {
 
     /// The text for `key`.
     ///
-    /// The release is searched in ``LocalizeConfiguration/localeChain``
-    /// order. A key no locale has gives the app's bundled string, then
-    /// `fallback`, then the key itself.
+    /// The user's language comes first: the release in ``LocalizeConfiguration/locale``
+    /// and its shorter forms, then the app's bundled string in that language.
+    /// After that the release in the fallback locale, the bundled string in
+    /// whatever language iOS picks for the app, `fallback`, and the key
+    /// itself.
     ///
     /// - Parameters:
     ///   - key: The key, such as `"nav.home"`.
@@ -295,27 +305,41 @@ public final class Localize: Sendable {
             if name == "count", let count { return String(count) }
             return arguments.value(named: name).map(LocalizeArguments.text)
         }
-        if let release = state.withLock({ $0.active }) {
+        // The user's own language first, wherever it is written: a text in
+        // it that the app shipped with says more to them than a newer one in
+        // another language.
+        let release = state.withLock { $0.active }
+        let own = localeChain.prefix(ownLocales)
+        if let release, let text = Self.text(in: release, own, key: key, count: count, namespace: namespace) {
+            return Interpolation.apply(text, resolve: resolve)
+        }
+        for localization in ownBundled {
+            if let bundled = BundledStrings.string(
+                key: key,
+                namespace: namespace,
+                in: localization,
+                arguments: arguments,
+                count: count
+            ) {
+                return bundled
+            }
+        }
+        let others = localeChain.dropFirst(ownLocales)
+        if let release, let text = Self.text(in: release, others, key: key, count: count, namespace: namespace) {
+            return Interpolation.apply(text, resolve: resolve)
+        }
+        // Nothing has the form the count asks for, nor the plain key. Before
+        // giving up on the release, take a language's general form.
+        if let release, count != nil {
+            let other = "\(key)_\(PluralCategory.other.rawValue)"
             for locale in localeChain {
                 guard let file = release.files[FileKey(locale: locale, namespace: namespace)] else { continue }
-                for name in KeyLookup.candidates(key: key, count: count, locale: locale) {
-                    if let text = KeyLookup.string(in: file, key: name) {
-                        return Interpolation.apply(text, resolve: resolve)
-                    }
-                }
-            }
-            // No locale has the form the count asks for, nor the plain key.
-            // Before giving up on the release, take a language's general form.
-            if count != nil {
-                let other = "\(key)_\(PluralCategory.other.rawValue)"
-                for locale in localeChain {
-                    guard let file = release.files[FileKey(locale: locale, namespace: namespace)] else { continue }
-                    if let text = KeyLookup.string(in: file, key: other) {
-                        return Interpolation.apply(text, resolve: resolve)
-                    }
+                if let text = KeyLookup.string(in: file, key: other) {
+                    return Interpolation.apply(text, resolve: resolve)
                 }
             }
         }
+        // What iOS picks for the app, which may be a third language.
         if let bundled = BundledStrings.string(
             key: key,
             namespace: namespace,
@@ -327,6 +351,24 @@ public final class Localize: Sendable {
         }
         if let fallback { return Interpolation.apply(fallback, resolve: resolve) }
         return key
+    }
+
+    /// The text `release` has for `key` in `locales`, which are tried in
+    /// order: the plain key, or with a count the form the count asks for.
+    private static func text(
+        in release: Release,
+        _ locales: ArraySlice<String>,
+        key: String,
+        count: Int?,
+        namespace: String
+    ) -> String? {
+        for locale in locales {
+            guard let file = release.files[FileKey(locale: locale, namespace: namespace)] else { continue }
+            for name in KeyLookup.candidates(key: key, count: count, locale: locale) {
+                if let text = KeyLookup.string(in: file, key: name) { return text }
+            }
+        }
+        return nil
     }
 
     // MARK: Refresh
@@ -565,15 +607,15 @@ public final class Localize: Sendable {
     ///
     /// Nothing has named this release as the published one. If it answers
     /// "not found" for the language asked for, it may be gone from the CDN,
-    /// or have nothing in that language, and reading it with empty files
-    /// would show its fallback language in place of the app's bundled
-    /// strings. So when a file of the locale asked for or of its shorter
-    /// forms is missing, the release must have shown that it has the
-    /// language: one of those files was found now, or it already has texts
-    /// in one of them, in the namespaces the app asks for. A file of the
-    /// fallback locale shows nothing of the kind. With that shown, a file it
-    /// does not have is an empty one, as for a regional locale without
-    /// overrides of its own or a namespace the language has no texts in.
+    /// or have nothing in that language, and a release that may be gone is
+    /// not put in use to show its fallback language. So when a file of the
+    /// locale asked for or of its shorter forms is missing, the release must
+    /// have shown that it has the language: one of those files was found
+    /// now, or it already has texts in one of them, in the namespaces the
+    /// app asks for. A file of the fallback locale shows nothing of the
+    /// kind. With that shown, a file it does not have is an empty one, as
+    /// for a regional locale without overrides of its own or a namespace the
+    /// language has no texts in.
     private func completed(_ release: Release, _ needed: [FileKey], _ loader: ReleaseLoader) async -> Release? {
         let missing = needed.filter { release.files[$0] == nil }
         // The locale asked for and its shorter forms, without the fallback locale.
