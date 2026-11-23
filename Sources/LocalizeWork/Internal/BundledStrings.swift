@@ -241,13 +241,18 @@ enum BundledStrings {
     /// or not: `zh` and `Hant` of `zh-Hant-TW` and of `zh-TW`. A style of a
     /// script is given as that script. The script is nil when it cannot be
     /// told.
+    ///
+    /// A script the code names is taken from wherever it stands: after the
+    /// language, or after a further language subtag as in `zh-yue-Hans`,
+    /// which the system would read as the script it expects of Cantonese.
+    /// Four letters after the language are always a script.
     private static func subtags(of code: String, systemScripts: Bool) -> (language: String, script: String?) {
         let canonical = LocaleCode.canonical(code)
         let parts = canonical.split(separator: "-").map(String.init)
         // Norwegian is written `no` by some and `nb` by others.
         let language = parts.first.map { $0 == "no" ? "nb" : $0 } ?? ""
-        if parts.count > 1, parts[1].count == 4, parts[1].allSatisfy(\.isLetter) {
-            return (language, styles[parts[1]] ?? parts[1])
+        if let named = parts.dropFirst().first(where: { $0.count == 4 && $0.allSatisfy(\.isLetter) }) {
+            return (language, styles[named] ?? named)
         }
         if systemScripts, #available(iOS 16, macOS 13, tvOS 16, watchOS 9, *) {
             let script = Locale.Language(identifier: canonical).script?.identifier

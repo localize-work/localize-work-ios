@@ -375,6 +375,10 @@ final class BundledStringsTests: LocalizeTestCase {
         XCTAssertEqual(try names(["en", "ur-Arab"], "ur"), ["ur-Arab"])
         XCTAssertEqual(try names(["pa-Arab", "en"], "pa-PK"), ["pa-Arab"])
         XCTAssertEqual(try names(["pa-Arab", "en"], "pa"), [])
+        // A script the code names counts wherever it stands in the code.
+        XCTAssertEqual(try names(["zh-Hant", "en"], "zh-yue-Hans"), [])
+        XCTAssertEqual(try names(["zh-Hans", "zh-Hant"], "zh-yue-Hans"), ["zh-Hans"])
+        XCTAssertEqual(try names(["zh-Hans", "zh-Hant"], "zh-cmn-Hant-TW"), ["zh-Hant"])
         // Old and new spellings of one language.
         XCTAssertEqual(try names(["he", "en"], "iw"), ["he"])
         XCTAssertEqual(try names(["nb", "en"], "no"), ["nb"])
