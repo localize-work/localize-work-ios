@@ -367,6 +367,14 @@ final class BundledStringsTests: LocalizeTestCase {
         XCTAssertEqual(try names(["zh-TW"], "zh-Hant"), ["zh-TW"])
         XCTAssertEqual(try names(["sr-Latn"], "sr"), [])
         XCTAssertEqual(try names(["fr"], "es"), [])
+        // A localization in the user's script is found behind one that is
+        // not, which the system would rank first.
+        XCTAssertEqual(try names(["sr-ME", "sr-Cyrl-ME", "en"], "sr-RS"), ["sr-Cyrl-ME"])
+        // Nastaliq is a style of the Arabic script, not another script.
+        XCTAssertEqual(try names(["en", "ur"], "ur-Arab"), ["ur"])
+        XCTAssertEqual(try names(["en", "ur-Arab"], "ur"), ["ur-Arab"])
+        XCTAssertEqual(try names(["pa-Arab", "en"], "pa-PK"), ["pa-Arab"])
+        XCTAssertEqual(try names(["pa-Arab", "en"], "pa"), [])
         // Old and new spellings of one language.
         XCTAssertEqual(try names(["he", "en"], "iw"), ["he"])
         XCTAssertEqual(try names(["nb", "en"], "no"), ["nb"])

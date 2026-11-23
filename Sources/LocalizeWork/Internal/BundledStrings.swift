@@ -15,9 +15,10 @@ enum BundledStrings {
 
     /// The localizations of `bundle` in the language of `locale`, in the
     /// order to read them; none when the bundle does not have the language.
-    /// The choice is the system's, as for a device set to `locale`: `en-FI`
-    /// reads `en-GB`, then `en`. A localization in another language, which
-    /// the system would fall back to, is not among them.
+    /// Among those the user can read, the choice and the order are the
+    /// system's, as for a device set to `locale`: `en-FI` reads `en-GB`, then
+    /// `en`. A localization in another language, which the system would fall
+    /// back to, is not among them.
     static func localizations(of bundle: Bundle, for locale: String) -> [Localization] {
         // `Base.lproj` holds strings too, in the development language.
         let development = bundle.developmentLocalization
@@ -25,16 +26,25 @@ enum BundledStrings {
         var names = bundle.localizations.filter { $0 != "Base" }
         if base != nil, let development, !names.contains(development) { names.append(development) }
         let wanted = subtags(of: locale)
-        // With nothing in the language, the system still answers, with a
-        // localization of its choosing. Those are told apart here.
-        return Bundle.preferredLocalizations(from: names, forPreferences: [locale]).flatMap { name -> [Localization] in
+        // The system ranks the bundle's localizations as a whole, and may
+        // answer with one the user cannot read while a readable one is there:
+        // `sr-ME`, in Latin letters, for `sr-RS`, ahead of `sr-Cyrl-ME`. So
+        // it is only given those in the language, written the same way. Two
+        // ways of writing a language are two languages to a reader.
+        let readable = names.filter { name in
             let found = subtags(of: name)
-            guard found.language == wanted.language else { return [] }
-            // Two ways of writing a language are two languages to a reader.
-            if let written = found.script, let asked = wanted.script, written != asked { return [] }
-            let folders = [folder(name, in: bundle), name == development ? base : nil]
-            return folders.compactMap { $0 }.map { Localization(tables: $0, name: name) }
+            guard found.language == wanted.language else { return false }
+            if let written = found.script, let asked = wanted.script, written != asked { return false }
+            return true
         }
+        // With nothing to choose from, the system still answers.
+        guard !readable.isEmpty else { return [] }
+        return Bundle.preferredLocalizations(from: readable, forPreferences: [locale])
+            .filter(readable.contains)
+            .flatMap { name -> [Localization] in
+                let folders = [folder(name, in: bundle), name == development ? base : nil]
+                return folders.compactMap { $0 }.map { Localization(tables: $0, name: name) }
+            }
     }
 
     /// The folder of one localization of `bundle`, opened as a bundle.
@@ -217,17 +227,27 @@ enum BundledStrings {
         return code.lowercased()
     }
 
+    /// Scripts that are a style of another one, which whoever reads the one
+    /// reads the other: Urdu's Nastaliq is Arabic script.
+    private static let styles = [
+        "Aran": "Arab", "Latf": "Latn", "Latg": "Latn", "Syre": "Syrc", "Syrj": "Syrc", "Syrn": "Syrc",
+    ]
+
     /// The language of a locale code and the script it is written in, named
-    /// or not: `zh` and `Hant` of `zh-Hant-TW` and of `zh-TW`. The script is
-    /// nil when it cannot be told.
+    /// or not: `zh` and `Hant` of `zh-Hant-TW` and of `zh-TW`. A style of a
+    /// script is given as that script. The script is nil when it cannot be
+    /// told.
     private static func subtags(of code: String) -> (language: String, script: String?) {
         let canonical = LocaleCode.canonical(code)
         let parts = canonical.split(separator: "-").map(String.init)
         // Norwegian is written `no` by some and `nb` by others.
         let language = parts.first.map { $0 == "no" ? "nb" : $0 } ?? ""
-        if parts.count > 1, parts[1].count == 4, parts[1].allSatisfy(\.isLetter) { return (language, parts[1]) }
+        if parts.count > 1, parts[1].count == 4, parts[1].allSatisfy(\.isLetter) {
+            return (language, styles[parts[1]] ?? parts[1])
+        }
         if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, *) {
-            return (language, Locale.Language(identifier: canonical).script?.identifier)
+            let script = Locale.Language(identifier: canonical).script?.identifier
+            return (language, script.map { styles[$0] ?? $0 })
         }
         // Older systems do not say. Chinese is the language whose regions
         // most often stand for a script.
