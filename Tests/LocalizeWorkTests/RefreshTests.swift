@@ -1185,7 +1185,11 @@ final class RefreshTests: LocalizeTestCase {
         let resolved = try XCTUnwrap(realpath(NSTemporaryDirectory(), nil))
         defer { free(resolved) }
         let temporary = URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
+        // A simulator keeps its files in a folder of the Mac's own, outside
+        // `/private`; there the first folder is an ordinary one.
+        #if !targetEnvironment(simulator)
         XCTAssertTrue(temporary.path.hasPrefix("/private/"), temporary.path)
+        #endif
         let underPrivate = temporary.appendingPathComponent("LocalizeWorkTests-private-\(UUID().uuidString)")
         let target = temporary.appendingPathComponent("LocalizeWorkTests-target-\(UUID().uuidString)")
         let link = temporary.appendingPathComponent("LocalizeWorkTests-link-\(UUID().uuidString)")
