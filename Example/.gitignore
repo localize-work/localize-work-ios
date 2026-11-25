@@ -1,0 +1,4 @@
+flow-shots/
+.flow-build/
+xcuserdata/
+!LocalizeDemo.xcodeproj

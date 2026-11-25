@@ -363,19 +363,24 @@ SwiftUI, with the stream of versions:
 struct ContentView: View {
     // The language your app has chosen, wherever you keep it.
     @AppStorage("language") private var language = "en"
-    @State private var release = Localize.shared.version
+    @State private var arrivals = 0
 
     var body: some View {
         Text(Localize.shared.string("nav.home"))
-            .id("\(language) \(release ?? "")")
+            .id("\(language) \(arrivals)")
             .task {
-                for await version in Localize.shared.updates {
-                    release = version
+                for await _ in Localize.shared.updates {
+                    arrivals += 1
                 }
             }
     }
 }
 ```
+
+Count what the stream tells you; do not compare versions. After a change of
+language the release in use may lack the new language, and when its files
+have arrived the stream names the same version again. A view that redraws
+only when the version differs would go on showing bundled strings.
 
 The loop keeps running when `Localize.configure` is called again: the stream
 then tells of the new instance's releases.
@@ -532,6 +537,26 @@ try await localize.refresh()
 `Localize(configuration:)` creates an instance of your own and downloads nothing
 until you call `refresh()`. Such an instance is a run by itself: it starts from
 the release saved on the device when it is created.
+
+## Example app
+
+`Example/LocalizeDemo.xcodeproj` is a one-screen SwiftUI app that uses the SDK
+from this folder: a few lookups, three language buttons and a refresh button,
+with bundled strings in English and Estonian. Open it in Xcode and run it. It
+reads the project to show from its launch arguments (Product › Scheme › Edit
+Scheme… › Arguments):
+
+```
+-projectSlug my-app
+-cdnBaseURL http://127.0.0.1:3001/cdn    (optional; the default is the CDN)
+-updatePolicy nextLaunch                 (optional)
+```
+
+`Example/flow.sh <simulator id>` runs the app through its whole life as UI
+tests: a first launch that cannot reach the server, the first download, a
+change of language, a new release with each update policy, and a cold start
+offline. It needs a localize.work API running on the same computer and a helper
+that publishes the next release; the script's first lines say what it expects.
 
 ## Limits of 0.1.0
 

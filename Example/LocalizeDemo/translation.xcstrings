@@ -1,0 +1,44 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Demo (bundled)" } },
+        "et" : { "stringUnit" : { "state" : "translated", "value" : "Demo (kaasas)" } }
+      }
+    },
+    "greeting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Hello, %1$@! (bundled)" } },
+        "et" : { "stringUnit" : { "state" : "translated", "value" : "Tere, %1$@! (kaasas)" } }
+      }
+    },
+    "items" : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : { "stringUnit" : { "state" : "translated", "value" : "%lld item (bundled)" } },
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld items (bundled)" } }
+            }
+          }
+        },
+        "et" : {
+          "variations" : {
+            "plural" : {
+              "one" : { "stringUnit" : { "state" : "translated", "value" : "%lld asi (kaasas)" } },
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld asja (kaasas)" } }
+            }
+          }
+        }
+      }
+    },
+    "only_bundled" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Only in the app" } },
+        "et" : { "stringUnit" : { "state" : "translated", "value" : "Ainult rakenduses" } }
+      }
+    }
+  },
+  "version" : "1.0"
+}
