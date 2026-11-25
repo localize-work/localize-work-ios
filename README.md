@@ -548,9 +548,10 @@ the release saved on the device when it is created.
 
 `Example/LocalizeDemo.xcodeproj` is a one-screen SwiftUI app that uses the SDK
 from this folder: a few lookups, three language buttons and a refresh button,
-with bundled strings in English and Estonian. Open it in Xcode and run it. It
-reads the project to show from its launch arguments (Product › Scheme › Edit
-Scheme… › Arguments):
+with bundled strings in English and Estonian. Open it in Xcode 16 or newer and
+run it; the project file is in a format older versions cannot read, though the
+SDK itself builds with Xcode 15. It reads the project to show from its launch
+arguments (Product › Scheme › Edit Scheme… › Arguments):
 
 ```
 -projectSlug my-app
