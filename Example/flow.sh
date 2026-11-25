@@ -24,11 +24,33 @@ BUNDLE_ID=work.localize.demo
 
 mkdir -p "$SHOTS"
 proxy=
-stop_proxy() { [ -n "$proxy" ] && kill "$proxy" 2>/dev/null; proxy=; }
+stop_proxy() {
+  if [ -n "$proxy" ]; then kill "$proxy" 2>/dev/null || true; fi
+  proxy=
+}
 start_proxy() {
   python3 forward.py "$PROXY_PORT" "$BACKEND_PORT" &
   proxy=$!
-  until curl -s -o /dev/null "http://127.0.0.1:$PROXY_PORT/cdn/$SLUG/latest.json"; do sleep 0.2; done
+  tries=0
+  until curl -fsS --max-time 5 -o /dev/null "http://127.0.0.1:$PROXY_PORT/cdn/$SLUG/latest.json" 2>/dev/null; do
+    tries=$((tries + 1))
+    # The forwarder ends at once when its port is taken, e.g. by one left
+    # over from an earlier run; what answers there then is not ours to stop.
+    if ! kill -0 "$proxy" 2>/dev/null; then
+      echo "FAILED: could not listen on port $PROXY_PORT (PROXY_PORT)" >&2
+      exit 1
+    fi
+    if [ "$tries" -ge 50 ]; then
+      echo "FAILED: no release of $SLUG at http://127.0.0.1:$BACKEND_PORT/cdn (BACKEND_PORT, SLUG)" >&2
+      exit 1
+    fi
+    sleep 0.2
+  done
+  sleep 0.5
+  if ! kill -0 "$proxy" 2>/dev/null; then
+    echo "FAILED: could not listen on port $PROXY_PORT (PROXY_PORT)" >&2
+    exit 1
+  fi
 }
 trap stop_proxy EXIT
 
@@ -45,9 +67,15 @@ phase() {
   echo "$output" | grep -q "TEST EXECUTE SUCCEEDED" || failed="$failed $1"
 }
 
-xcodebuild build-for-testing -project LocalizeDemo.xcodeproj -scheme LocalizeDemo \
-  -destination "platform=iOS Simulator,id=$SIMULATOR" -derivedDataPath "$DERIVED" 2>&1 |
-  grep -E "error:|TEST BUILD (SUCCEEDED|FAILED)"
+# The phases run what this builds, so a failed build stops the flow here.
+built=0
+build=$(xcodebuild build-for-testing -project LocalizeDemo.xcodeproj -scheme LocalizeDemo \
+  -destination "platform=iOS Simulator,id=$SIMULATOR" -derivedDataPath "$DERIVED" 2>&1) || built=$?
+echo "$build" | grep -E "error:|TEST BUILD (SUCCEEDED|FAILED)" || true
+if [ "$built" -ne 0 ]; then
+  echo "FAILED: the build" >&2
+  exit 1
+fi
 
 # A fresh install: nothing saved on the device.
 xcrun simctl boot "$SIMULATOR" 2>/dev/null || true

@@ -40,7 +40,11 @@ struct ContentView: View {
         // language the same release arrives again, with the new language.
         .id("\(language) \(arrivals)")
         .task {
-            for await _ in Localize.shared.updates {
+            // Listen first, then draw once more: a release that started being
+            // used between the first drawing and this line is not told again.
+            let updates = Localize.shared.updates
+            arrivals += 1
+            for await _ in updates {
                 arrivals += 1
             }
         }

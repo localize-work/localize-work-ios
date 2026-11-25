@@ -369,13 +369,19 @@ struct ContentView: View {
         Text(Localize.shared.string("nav.home"))
             .id("\(language) \(arrivals)")
             .task {
-                for await _ in Localize.shared.updates {
+                let updates = Localize.shared.updates
+                arrivals += 1
+                for await _ in updates {
                     arrivals += 1
                 }
             }
     }
 }
 ```
+
+Take the stream first and then draw once more, as the sample does. The stream
+tells only of releases that start being used after it was taken, and the
+download `configure` starts can finish before the view's task runs.
 
 Count what the stream tells you; do not compare versions. After a change of
 language the release in use may lack the new language, and when its files
