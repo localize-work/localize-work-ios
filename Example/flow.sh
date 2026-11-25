@@ -7,6 +7,8 @@
 # published files under /cdn) and a helper that publishes the flow project's
 # next release (CONTROL, with /state/<slug> and /publish-next/<slug>). The
 # phases and the texts they expect are in LocalizeDemoUITests/FlowTests.swift.
+# The simulator's own language should be English: where a language has no
+# bundled text, the tests expect the app's English one.
 #
 # Set REAL_SLUG to a published project to also read it from the default CDN.
 set -eu
