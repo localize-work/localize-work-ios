@@ -10,8 +10,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-14 carries Swift 5.10, macos-15 Swift 6.
-        os: [macos-14, macos-15]
+        # GitHub no longer offers macos-14, which carried Swift 5.10.
+        os: [macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
